@@ -14,7 +14,50 @@ metadata:
         - pandas
 ---
 
-# A股综合分析技能 (TuShare + AkShare + Exa联动)
+# A股综合分析技能 v0.9 (TuShare + AkShare + Exa联动)
+
+## Prerequisites
+
+| 依赖 | 必须？ | 说明 |
+|------|--------|------|
+| **Python 3.8+** | ✅ 必须 | Python 运行环境 |
+| **tushare + akshare + pandas** | ✅ 必须 | pip install，OpenClaw 自动处理 |
+| **TuShare Token** | ✅ 必须 | 免费注册获取（见下方） |
+| **mcporter / Exa** | ⚠️ 可选 | 深度联动分析需要，无则降级为纯本地模式 |
+
+### TuShare Token 设置（必做！）
+
+```bash
+# 1. 注册账号：https://tushare.pro/register
+# 2. 获取个人 token（个人中心 → 接口TOKEN）
+# 3. 设置环境变量或写入代码
+echo 'export TUSHARE_TOKEN="your_token_here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+> ⚠️ **没有 Token 会报错**：`Tushare Error: Invalid token`。注册免费，获取后设一次即可永久使用。
+
+## Installation
+
+### 方式一：ClawHub 一键安装（推荐）
+```bash
+clawhub install a-stock-combo --version 0.9.0
+# OpenClaw 自动处理 python3 + pip install tushare akshare pandas
+```
+
+### 方式二：从 GitHub Clone
+```bash
+cd ~/.openclaw/workspace/skills/
+git clone https://github.com/zscyun/a-stock-screener.git a-stock-combo
+cd a-stock-combo && pip install -r requirements.txt
+# 然后设置 TuShare Token（见上方 Prerequisites）
+```
+
+### 验证安装
+```bash
+python scripts/stock_screen.py analyze --codes "600519"
+# 看到茅台的实时行情 + 技术指标 = ✅ 安装成功
+```
 
 ## 快速开始
 
@@ -150,21 +193,15 @@ mcporter call 'exa.web_search_exa' "query=XX股份 风险 预警 减持"
 | web_fetch财报详情 | ❌ | ✅ |
 | 分析师共识/评级补充 | ❌ | ✅ (Exa+web) |
 
-## 🎯 选股推荐（轻量版）⭐ NEW
+## 🎯 选股推荐（轻量版）⭐ v0.9
 
-基于预定义30只各板块龙头股的实时数据做快速筛选，支持多因子打分排序。
+基于全动态池的实时数据做快速筛选，支持多因子打分排序。无硬编码池子，每次运行自动发现优质候选。
 
 ### 用法
 
 ```bash
-# 从热门股池筛选 Top N
+# 从热门股池筛选 Top N（默认混合模式：价值6:趋势4）
 python scripts/stock_screen.py screen --limit 8
-
-# 🔥 先通过 Exa 动态发现新标的再筛选（突破30只限制）
-python scripts/stock_screen.py screen --limit 10 --discover
-
-# 纯发现模式：只看 Exa 发现了什么新热门股
-python scripts/stock_screen.py discover --max-discover 15
 
 # 按涨幅范围筛选（默认 -2% ~ 15%）
 python scripts/stock_screen.py screen --limit 5 --min-change 2.0 --max-change 7.0
@@ -176,10 +213,10 @@ python scripts/stock_screen.py analyze --codes "600519,300750,688256"
 python scripts/stock_screen.py screen --limit 5 --format json
 ```
 
-### 🔍 Exa 动态发现（NEW v1.3）
-- `--discover` 标志：在筛选前先调用 Exa 搜索近期 A 股热门榜单，自动提取名称+代码对并入池
-- `discover` 子命令：纯发现模式，直接输出新发现的标的列表
-- 解析策略：从财经资讯原文中提取"股票名+6位代码"格式（如 "圣阳股份002580"），无需额外网络请求
+### 🔍 动态池子（v6+ 零硬编码）
+- **三层发现源**：stock_hot_rank_em(热度) + stock_zt_pool_em(涨停) + stock_zh_a_spot_em(高涨幅兜底)
+- **持久化记忆**：`hot_pool_state.json` 保存上次发现的优质池子，保证连续性
+- **缓存机制**：估值+财务数据自动缓存（<1h），避免重复查询
 
 ### 筛选因子
 | 因子 | 默认值 | 说明 |
@@ -189,16 +226,7 @@ python scripts/stock_screen.py screen --limit 5 --format json
 | 成交额 | >5亿 | 流动性筛选 |
 | 综合打分 | - | 涨幅适中+PE低+成交活跃 → 高分优先 |
 
-### 预定义热门股池（30只，覆盖7大板块）
-- **科技/AI/芯片**: 中芯国际、寒武纪-U、立讯精密、北方华创
-- **新能源/电池**: 宁德时代、比亚迪、隆基绿能
-- **消费/白酒**: 贵州茅台、五粮液、山西汾酒
-- **金融**: 中国平安、招商银行、中国建筑
-- **医药/生物**: 恒瑞医药、迈瑞医疗、药明康德
-- **高端制造**: 紫金矿业、荣盛石化、海螺水泥
-
 ### ⚠️ 局限
-- 默认覆盖30只预定义标的，**使用 `--discover` 可动态扩展至40+只**
 - TuShare免费接口不返回PE/PB，需AkShare补充（当前部分不通）
 - Exa搜索依赖 mcporter + 网络环境，断开时自动降级为纯本地筛选
 - 推荐结果仅供参考，不构成投资建议
@@ -220,7 +248,7 @@ python scripts/a_stock_cli.py fetch-financials --code "300750"
 # 综合报告（默认全量）
 python scripts/a_stock_cli.py analyze --code "600519" --type full
 
-# ── 选股筛选 v4 — 混合打分模型 ──
+# ── 选股筛选 v0.9 — 混合打分模型 ──
 # 默认混合模式 (价值6:趋势4)
 python scripts/stock_screen.py screen --limit 8
 python scripts/stock_screen.py analyze --codes "600519,300750"
@@ -234,29 +262,68 @@ python scripts/stock_screen.py screen --mode value --limit 8
 
 # 纯趋势模式（适合短线交易观察）
 python scripts/stock_screen.py screen --mode trend --limit 8
-
-# Exa动态发现 + 合并池筛选
-python scripts/stock_screen.py discover --max-discover 10
-python scripts/stock_screen.py screen --discover --limit 12
 ```
 
 ## 局限性
 
 - TuShare免费接口标注"即将停止更新"，但当前仍可用
-- AkShare东方财富源部分不通，依赖新浪/THS备用源  
+- AkShare东方财富源部分不通，依赖新浪/THS备用源
 - 不支持港股/美股 → 用 `china-stock-analysis` + Exa web抓取
 - 理杏仁/同花顺等网站有反爬限制，web_fetch可能失败
 
+## Troubleshooting
+
+### ❌ `Tushare Error: Invalid token` / `token not found`
+- **原因**：TuShare Token 未设置或过期
+- **解决**：重新获取 Token → 更新环境变量 `TUSHARE_TOKEN`
+
+### ❌ `ImportError: No module named 'akshare'` 等 pip 报错
+```bash
+cd ~/.openclaw/workspace/skills/a-stock-combo
+pip install -r requirements.txt --upgrade
+```
+
+### ❌ AkShare 东方财富源网络不通（`stock_zh_a_spot_em` 超时）
+- **原因**：部分地区的网络环境无法直接访问东方财富 API
+- **解决**：代码已内置新浪/THS 备用源，会自动 fallback。如仍失败，检查防火墙或代理设置
+
+### ❌ `pandas KeyError` / 负索引报错
+- **原因**：旧版 pandas（<2.0）不支持 `.iloc[]`
+- **解决**：`pip install 'pandas>=2.0.0' --upgrade`
+
+### ❌ Exa/mcporter 调用失败
+- **原因**：mcporter 未配置或 Exa API Key 无效
+- **影响**：仅深度联动分析（Step 2）不可用，基本筛选功能正常
+- **解决**：检查 `~/.openclaw/workspace/config/mcporter.json` 配置
+
+### ❌ screener 结果全为"⚠️亏损/流动性风险"
+- **原因**：L1 预筛缓存未建立（首次运行）
+- **解决**：跑一次完整筛选后，FA_CACHE 会自动建立，后续质量提升
+
 ---
 
-## v4.0 Changelog (2026-05-07)
+## v0.9 Changelog (2026-05-11)
 
-### 🔀 混合打分模型（核心升级）
-- **三种模式**：`hybrid`（默认）、`value`、`trend`
-- **可调比例**：通过 `--ratio "6:4"` 自定义价值/趋势权重（如 5:5、7:3）
-- **负面新闻惩罚**：Exa搜索公司近期新闻，检测到造假/处罚/立案等严重事件时大幅扣分
+### 🎯 选股筛选（核心升级链）
+| 版本 | 日期 | 功能 |
+|------|------|------|
+| v4.0 | 05-07 | 混合打分模型(hybrid/value/trend) + 可调比例 |
+| v4.3 | 05-07 | 期间收益率集成打分（近1月/3月/半年/1年） |
+| v6 | 05-08 | 全动态池子+零Exa依赖+三层发现源 |
+| v8 | 05-08 | 收益率补齐+tushare静默+三面板输出 |
+| **v0.9** | 05-09→11 | P1-P5全面升级（见下方） |
 
-### 📊 新增 5 个趋势因子
+### ✅ P1-P5 全部完成
+
+| # | 优先级 | 任务 | 说明 |
+|---|--------|------|------|
+| P1 | L1筛选 | 基本面预筛（排除亏损/高负债/低毛利） | 缓存驱动，渐进式生效 |
+| P2 | Bug修复 | 毛利率"无数据"bug修复 + 键名对齐 | `gm_val` 引用修正 |
+| P3 | 组合建议 | _classify_stock_type + _get_sector_name + 行业分散 | 保守型满3只+价值类筛选 |
+| P4 | 技术面 | RSI/MACD/BOLL指标加入Panel + ROE阈值校准 | format_output双路径渲染 |
+| P5 | backtest | 回测引擎（连续评分+MA排列+RSI因子，阈值可调） | `--threshold` CLI参数 |
+
+### 📊 新增 4 个趋势因子
 | 因子 | 说明 | 满分 |
 |------|------|------|
 | consec_up_days | K线连续上涨天数（3-5天最佳） | 1分 |
@@ -267,5 +334,7 @@ python scripts/stock_screen.py screen --discover --limit 12
 ### 💎 价值因子组（7个，v3保留增强）
 PE(TTM)、PB、PEG、ROE、毛利率+净利率、现金流、财务健康度
 
-### ⚠️ Bug修复
-- 负面新闻检查不再误判搜索关键词回显（改为先搜公司名+年份，再检查结果中是否有负面词）
+### ⚠️ Bug修复教训
+- pandas Series 不支持原生负索引，必须用 `.iloc[]`
+- import datetime 需在被引用的地方之前执行
+- 打分阈值与因子权重必须匹配校准，否则信号全不触发
