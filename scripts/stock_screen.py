@@ -839,8 +839,13 @@ def get_stock_data(code: str, include_valuation: bool = True) -> Optional[Dict[s
 
 def analyze_codes(codes_str: str, limit: int = 10,
                   include_valuation: bool = True,
-                  weights: Optional[Dict] = None) -> List[Dict[str, Any]]:
-    """分析指定股票列表"""
+                  weights: Optional[Dict] = None,
+                  use_exa: bool = False) -> List[Dict[str, Any]]:
+    """分析指定股票列表
+    
+    Args:
+        use_exa: 是否启用Exa板块热度搜索 (默认False保性能)
+    """
     codes = [c.strip() for c in codes_str.split(',') if c.strip()]
 
     # 如果输入的是名称,尝试匹配代码
@@ -866,7 +871,7 @@ def analyze_codes(codes_str: str, limit: int = 10,
     for code in final_codes[:limit]:
         data = get_stock_data(code, include_valuation=include_valuation)
         if data:
-            score = compute_score(data, weights=weights)
+            score = compute_score(data, weights=weights, use_exa=use_exa)
             data['screen_score'] = round(score, 2)
             results.append(data)
 
@@ -882,8 +887,13 @@ def screen_hot_pool(
     discovered: Optional[Dict[str, str]] = None,
     include_valuation: bool = True,
     weights: Optional[Dict] = None,
+    use_exa: bool = False
 ) -> List[Dict[str, Any]]:
-    """从动态构建的池子筛选 (三层漏斗: L1全量→L2热度动量→L3财务深度)"""
+    """从动态构建的池子筛选 (三层漏斗: L1全量→L2热度动量→L3财务深度)
+    
+    Args:
+        use_exa: 是否启用Exa板块热度搜索 (默认False保性能，与analyze统一规则)
+    """
     # 构建动态池 (合并持久化记忆 + 新发现)  
     dynamic_state = _load_pool_state()
     dynamic_pool_raw = dynamic_state.get('pool', {})
@@ -920,7 +930,7 @@ def screen_hot_pool(
         if data:
             cpct = data.get('change_pct', 0)
             if min_change_pct <= cpct <= max_change_pct:
-                score = compute_score(data, weights=weights, use_exa=False)
+                score = compute_score(data, weights=weights, use_exa=use_exa)
                 data['screen_score'] = round(score, 2)
                 results.append(data)
 
@@ -2473,7 +2483,8 @@ def main():
         sub.add_argument('--format', choices=['table', 'json'], default='table')
         sub.add_argument('--no-valuation', action='store_true', help='跳过估值/财务查询(更快)')
         sub.add_argument('--weights', type=str, default=None,
-                         help='自定义因子权重JSON, 如 \'{"momentum":3.0,"roe":2.0}\'')
+                        help='自定义权重JSON，如 \'{"valuation_pe":2.0}\'')
+        sub.add_argument('--enable-exa', action='store_true', help='启用Exa板块热度搜索(默认关闭)')
 
     args = parser.parse_args()
 
@@ -2500,6 +2511,7 @@ def main():
                 limit=args.limit,
                 include_valuation=show_valuation,
                 weights=custom_weights,
+                use_exa=getattr(args, 'enable_exa', False),
             )
 
             if fmt == 'json':
@@ -2526,6 +2538,7 @@ def main():
                 discovered=discovered,
                 include_valuation=show_valuation,
                 weights=custom_weights,
+                use_exa=getattr(args, 'enable_exa', False),
             )
 
             if fmt == 'json':

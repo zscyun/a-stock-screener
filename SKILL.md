@@ -248,9 +248,14 @@ python scripts/a_stock_cli.py fetch-financials --code "300750"
 # 综合报告（默认全量）
 python scripts/a_stock_cli.py analyze --code "600519" --type full
 
-# ── 选股筛选 v0.9 — 12因子混合打分（价值7+趋势4）──
-python scripts/stock_screen.py screen --limit 8
+# ── 选股筛选 v0.9 — 统一打分规则（价值7+趋势4）──
+# 默认不启用Exa（保性能，两种模式得分一致）
+python scripts/stock_screen.py screen --limit 10
 python scripts/stock_screen.py analyze --codes "600519,300750"
+
+# 启用Exa板块热度搜索（需mcporter配置，两种模式统一规则）
+python scripts/stock_screen.py screen --enable-exa --limit 10
+python scripts/stock_screen.py analyze --codes "600519" --enable-exa
 
 # 跳过估值查询（更快，适合快速筛选）
 python scripts/stock_screen.py screen --no-valuation --limit 10
