@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.hot_pool_state.json
+.env
+.DS_Store
