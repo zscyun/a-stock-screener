@@ -3,9 +3,10 @@
 """
 轻量版股票筛选器 v0.9 - 混合源方案
 =====================================
-由于东方财富实时行情接口受限,采用混合策略:
-1. Exa 搜索发现热门/强势标的(可选)
-2. TuShare/AkShare 个股分析确认
+采用akshare多源数据 + Exa可选增强:
+1. akshare三源发现热门标的 (stock_hot_rank_em/zt_pool_em/全量扫描)
+2. TuShare/AkShare 个股分析确认 (估值+财务+K线)
+3. Exa搜索近期新闻情绪 (可选，需mcporter配置)
 
 Usage:
     # 快速模式:直接分析指定股票池
@@ -23,9 +24,10 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 try:
     from urllib.request import urlopen
 except ImportError:
@@ -42,8 +44,6 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 import io as _io_module
 from contextlib import redirect_stdout as _redirect_stdout
-
-MCPORTER_CONFIG = os.path.expanduser('~/.openclaw/workspace/config/mcporter.json')
 
 # ═══════════════════════════════════════════════
 # 动态池管理 (v7) — 零硬编码，三层漏斗筛选  
@@ -314,7 +314,7 @@ def safe_serializable(obj: Any) -> Any:
         return str(obj)
 
 
-# ─── Exa 动态发现模块 ──────────────────────────────
+# ─── 动态发现模块 (akshare三源) ─────────────────────
 
 # ═══════════════════════════════════════════════
 # 持久化池管理 (v7) — 零硬编码，三层漏斗筛选
@@ -818,6 +818,12 @@ def get_stock_data(code: str, include_valuation: bool = True) -> Optional[Dict[s
             tech_indicators = _calc_technical_indicators(hist_df)
             if tech_indicators:
                 data.update(tech_indicators)
+            
+            # ── v0.9新增：为趋势因子提供K线原始数据 ──
+            closes_series = hist_df['收盘'].astype(float).values.tolist()
+            volumes_series = hist_df.get('成交量', pd.Series([0]*len(hist_df))).astype(float).values.tolist() if '成交量' in hist_df.columns else []
+            data['_kline_closes'] = closes_series[-60:]  # 最近60天收盘价
+            data['_kline_volumes'] = volumes_series[-60:] if volumes_series else []
 
         # ── TODO #2: 估值 + 财务数据 ──
         if include_valuation:
@@ -914,7 +920,7 @@ def screen_hot_pool(
         if data:
             cpct = data.get('change_pct', 0)
             if min_change_pct <= cpct <= max_change_pct:
-                score = compute_score(data, weights=weights)
+                score = compute_score(data, weights=weights, use_exa=False)
                 data['screen_score'] = round(score, 2)
                 results.append(data)
 
@@ -926,7 +932,7 @@ def screen_hot_pool(
 
 # 默认因子权重配置（总分10分制）
 DEFAULT_WEIGHTS = {
-    'momentum':     2.0,   # 动量：涨幅适中、均线多头
+    # === 价值因子组 (7个) ===
     'valuation_pe': 1.5,   # PE(TTM) 合理区间
     'valuation_pb': 1.0,   # PB 合理区间
     'peg':          1.0,   # PEG < 1 加分
@@ -934,6 +940,12 @@ DEFAULT_WEIGHTS = {
     'margins':      1.0,   # 毛利率 + 净利率
     'cashflow':     0.8,   # 每股经营现金流为正
     'health':       0.7,   # 负债率健康、流动/速动比率好
+    
+    # === 趋势因子组 (4个，v0.9新增) ===
+    'consec_up_days': 1.2, # K线连续上涨天数（3-5天最佳）
+    'volume_surge':   1.0, # 今日量 vs 20日均量（温和放量最佳）
+    'ma_alignment':   1.2, # MA多头排列程度
+    'sector_heat':    0.8, # 板块热度（Exa搜索新闻情绪）
 }
 
 def _score_momentum(data: Dict[str, Any]) -> float:
@@ -1139,12 +1151,176 @@ def _score_health(debt_ratio: Optional[float], current_ratio: Optional[float], q
     return score / count if count > 0 else 0.4
 
 
-def compute_score(data: Dict[str, Any], weights: Optional[Dict] = None) -> float:
+# ─── 趋势因子组 (v0.9新增，纯本地计算) ──────────────────────
+
+EXA_SECTOR_CACHE: Dict[str, Tuple[float, str]] = {}  # code → (score, reason)
+EXA_LAST_SEARCH_TS: float = 0  # Exa搜索时间戳，防频繁调用
+EXA_COOLDOWN_SECONDS = int(os.getenv('EXA_COOLDOWN', '1800'))  # 默认30分钟冷却
+EXA_FAILED: bool = False  # Exa是否发生过不可达（用于最终输出提醒）
+
+
+def _score_consec_up_days(closes: List[float]) -> float:
+    """
+    连续上涨天数评分 → 满分1分
+    
+    逻辑：从最新交易日往前数，统计连续收盘价 > 前一天收盘的天数
+      3-5天最佳（趋势确立但未过热），≥8天严重追高风险
+    """
+    if not closes or len(closes) < 2:
+        return 0.4  # 数据不足，中性分
+    
+    consec = 0
+    for i in range(len(closes) - 1, 0, -1):
+        if closes[i] > closes[i - 1]:
+            consec += 1
+        else:
+            break
+    
+    if 3 <= consec <= 5:
+        return 1.0   # 🎯 最佳区间：趋势确立但未过热
+    elif consec >= 8:
+        return 0.2   # ⚠️ 严重过热，追高风险极高
+    elif consec >= 6:
+        return 0.6   # 开始过热，需警惕
+    elif consec == 1 or consec == 2:
+        return 0.3   # 刚启动，信号偏弱
+    else:
+        return 0.4   # 横盘或下跌，中性偏保守
+
+
+def _score_volume_surge(volumes: List[float]) -> float:
+    """
+    成交量异动评分 → 满分1分
+    
+    逻辑：今日量 vs 近20日均量
+      1.5-3倍温和放量最佳（资金关注信号），>5倍异常放量需警惕
+    """
+    if not volumes or len(volumes) < 20:
+        return 0.4  # 数据不足，中性分
+    
+    avg_vol_20 = sum(volumes[-20:]) / 20.0
+    if avg_vol_20 <= 0:
+        return 0.4
+    
+    vol_ratio = volumes[-1] / avg_vol_20
+    
+    if 1.5 <= vol_ratio <= 3.0:
+        return 1.0   # 🎯 温和放量：资金关注但未疯狂
+    elif vol_ratio > 5.0:
+        return 0.2   # ⚠️ 异常放量：可能是出货或恐慌性抛售
+    elif vol_ratio < 0.5:
+        return 0.1   # 缩量：流动性不足，关注度低
+    
+    # 默认区间 [0.5, 1.5) 和 (3.0, 5.0]
+    return max(0.3, min(0.7, vol_ratio * 0.2))
+
+
+def _score_ma_alignment(closes: List[float]) -> float:
+    """
+    MA多头排列评分 → 满分1分
+    
+    逻辑：计算MA5/MA10/MA20并判断排列关系
+      完美多头(MA5>MA10>MA20)最佳，空头排列最差
+    """
+    if not closes or len(closes) < 20:
+        return 0.4  # 数据不足
+    
+    ma5 = sum(closes[-5:]) / 5.0 if len(closes) >= 5 else 0
+    ma10 = sum(closes[-10:]) / 10.0 if len(closes) >= 10 else 0
+    ma20 = sum(closes[-20:]) / 20.0 if len(closes) >= 20 else 0
+    
+    if ma5 > 0 and ma10 > 0 and ma20 > 0:
+        if ma5 > ma10 > ma20:
+            return 1.0   # 🎯 完美多头排列：短期>中期>长期
+        elif ma5 > ma10:
+            return 0.6   # 短期强势，中期待确认
+        elif ma10 > ma20:
+            return 0.4   # 中期趋势向上，短期需观察
+    
+    return 0.3   # 均线交错或空头排列
+
+
+def _score_sector_heat(code: str, name: str) -> float:
+    """
+    板块热度评分 → 满分1分（调用Exa搜索近期新闻）
+    
+    逻辑：通过mcporter调Exa API搜索公司相关股票新闻，
+          检测负面关键词则扣分，否则按结果数量加分。
+    冷却机制：同一批次最多调用一次Exa搜索。
+    """
+    global EXA_FAILED
+    # Step 1: 查缓存
+    if code in EXA_SECTOR_CACHE:
+        score, reason = EXA_SECTOR_CACHE[code]
+        print(f"   🔍 Exa缓存命中 [{name}]: {reason}", file=sys.stderr)
+        return score
+    
+    # Step 2: 检查冷却时间
+    now_ts = time.time()
+    if now_ts - EXA_LAST_SEARCH_TS < EXA_COOLDOWN_SECONDS:
+        print(f"   🔍 Exa冷却中 [{name}] ({EXA_COOLDOWN_SECONDS - (now_ts - EXA_LAST_SEARCH_TS):.0f}s后可重试)", file=sys.stderr)
+        return 0.5
+    
+    # Step 3: 调用Exa搜索（通过mcporter subprocess）
+    try:
+        search_query = f"{name} {code} A股 股票"
+        mcporter_config = os.path.expanduser('~/.openclaw/workspace/config/mcporter.json')
+        cmd = [
+            'mcporter', '--config', mcporter_config,
+            'call', 'exa.web_search_exa',
+            f'query={search_query}', '--args', '{"numResults":3}'
+        ]
+        print(f"   🔍 Exa搜索 [{name}]: {cmd[5]}", file=sys.stderr)
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=15
+        )
+        
+        if result.returncode != 0:
+            print(f"   ⚠️ Exa调用失败 [{name}]: {result.stderr[:200]}", file=sys.stderr)
+            return 0.5
+        
+        # Step 4: 解析结果
+        output = result.stdout
+        negative_keywords = ['造假', '立案', '处罚', '退市', '违规', '财务舞弊']
+        has_negative = any(kw in output for kw in negative_keywords)
+        
+        title_count = output.count('Title:') if 'Title:' in output else 0
+        
+        if has_negative:
+            score = 0.2  # ⚠️ 检测到负面信号
+            reason = f"负面关键词检测(结果{title_count}条)"
+        elif title_count >= 2:
+            score = 0.8  # 多篇文章覆盖，关注度较高
+            reason = f"高热度({title_count}篇报道)"
+        elif title_count == 1:
+            score = 0.6  # 有报道但不多
+            reason = f"中等热度({title_count}篇报道)"
+        else:
+            score = 0.5  # 无明确结果，中性
+            reason = "无搜索结果"
+        
+        EXA_SECTOR_CACHE[code] = (score, reason)
+        return score
+    
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️ Exa超时 [{name}]", file=sys.stderr)
+        EXA_FAILED = True
+        return 0.5
+    except Exception as e:
+        print(f"   ⚠️ Exa异常 [{name}]: {str(e)[:100]}", file=sys.stderr)
+        EXA_FAILED = True
+        return 0.5
+
+
+def compute_score(data: Dict[str, Any], weights: Optional[Dict] = None, use_exa: bool = True) -> float:
     """
     多因子综合打分（满分10分）
     
     因子权重可通过 --weights JSON 参数传入，如：
       --weights '{"momentum":3.0,"valuation_pe":1.0}'
+    use_exa=False 时跳过Exa搜索（批量筛选模式）
     """
     w = dict(DEFAULT_WEIGHTS)
     if weights:
@@ -1152,10 +1328,6 @@ def compute_score(data: Dict[str, Any], weights: Optional[Dict] = None) -> float
 
     total_weight = sum(w.values())
     weighted_score = 0.0
-
-    # 动量
-    s = _score_momentum(data)
-    weighted_score += s * w['momentum']
 
     # PE
     s = _score_pe(data.get('pe_ttm'))
@@ -1188,6 +1360,40 @@ def compute_score(data: Dict[str, Any], weights: Optional[Dict] = None) -> float
         data.get('quick_ratio'),
     )
     weighted_score += s * w['health']
+
+    # === 趋势因子组 (v0.9新增) ===
+    
+    # 连续上涨天数
+    kline_closes = data.get('_kline_closes') or []
+    if kline_closes:
+        s = _score_consec_up_days(kline_closes)
+        weighted_score += s * w['consec_up_days']
+    else:
+        print("   ⚠️ 无K线收盘价数据，跳过连续上涨天数评分", file=sys.stderr)
+    
+    # 成交量异动
+    kline_volumes = data.get('_kline_volumes') or []
+    if kline_volumes:
+        s = _score_volume_surge(kline_volumes)
+        weighted_score += s * w['volume_surge']
+    else:
+        print("   ⚠️ 无K线成交量数据，跳过放量检测评分", file=sys.stderr)
+    
+    # MA多头排列
+    if kline_closes:
+        s = _score_ma_alignment(kline_closes)
+        weighted_score += s * w['ma_alignment']
+    else:
+        print("   ⚠️ 无K线收盘价数据，跳过MA排列评分", file=sys.stderr)
+    
+    # 板块热度（Exa搜索，批量模式跳过）
+    stock_code = data.get('code', '')
+    stock_name = data.get('name', '未知')
+    if use_exa:
+        s = _score_sector_heat(stock_code, stock_name)
+    else:
+        s = 0.5  # 批量模式用中性分跳过Exa
+    weighted_score += s * w['sector_heat']
 
     # 归一化到 0-10
     final = round(weighted_score / total_weight * 10, 2)
@@ -2239,7 +2445,7 @@ def _calc_simple_signal_score(hist_df, current_price, change_pct):
     return round(min(score, 10.0), 2)
 def main():
     """主函数入口 - stock_screen v9+ (P1-P5 completed)"""
-    parser = argparse.ArgumentParser(description='轻量版股票筛选器 v3 — 多因子打分 + 估值增强')
+    parser = argparse.ArgumentParser(description='轻量版股票筛选器 v0.9 — 混合打分模型 (价值6:趋势4) + Exa可选增强')
     subparsers = parser.add_subparsers(dest='action', help='操作类型')
 
     # ── 分析指定股票 ──
@@ -2252,14 +2458,14 @@ def main():
     screen_p.add_argument('--limit', type=int, default=10)
     screen_p.add_argument('--min-change', type=float, default=-2.0)
     screen_p.add_argument('--max-change', type=float, default=15.0)
-    screen_p.add_argument('--discover', action='store_true', help='先通过 Exa 搜索发现新标的再筛选')
+    screen_p.add_argument('--discover', action='store_true', help='先通过akshare三源发现新标的再筛选')
 
     # ── P5: 回测功能 ──
     backtest_p = subparsers.add_parser('backtest', help='历史回测验证模型信号')
     backtest_p.add_argument('--codes', required=True, help='股票代码列表,逗号分隔')
     backtest_p.add_argument('--days', type=int, default=250, help='回测天数（默认250天≈1年）')
     backtest_p.add_argument('--threshold', type=float, default=6.0, help='买入信号得分阈值（默认6分）')
-    discover_p = subparsers.add_parser('discover', help='通过 Exa 动态发现热门标的')
+    discover_p = subparsers.add_parser('discover', help='通过akshare三源动态发现热门标的')
     discover_p.add_argument('--max-discover', type=int, default=10, help='最多发现几只新标的')
 
     # ── 全局选项: JSON输出 / 权重配置 / 快速模式 ──
@@ -2300,6 +2506,11 @@ def main():
                 print(json.dumps(safe_serializable(results), ensure_ascii=False, indent=2))
             else:
                 format_output(results, f"🎯 个股分析 ({len(results)}只)", show_valuation=show_valuation)
+                # Exa不可达时提醒
+                if EXA_FAILED:
+                    print("\n⚠️ [注意] Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
+                    print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
+                    print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
 
         elif args.action == 'screen':
             # 默认走动态池构建（零硬编码），--discover标志保留向后兼容  
@@ -2342,6 +2553,12 @@ def main():
                 format_portfolio_suggestion(results, max_count=5)
                 print(f"\n{'='*50}")
                 print(f"注: 基于{pool_note}实时数据")
+                
+                # Exa不可达时提醒
+                if EXA_FAILED:
+                    print("\n⚠️ [注意] 本次筛选过程中 Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
+                    print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
+                    print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
 
         elif args.action == 'discover':
             discovered = discover_stocks(max_discover=getattr(args, 'max_discover', 10))

@@ -248,20 +248,15 @@ python scripts/a_stock_cli.py fetch-financials --code "300750"
 # 综合报告（默认全量）
 python scripts/a_stock_cli.py analyze --code "600519" --type full
 
-# ── 选股筛选 v0.9 — 混合打分模型 ──
-# 默认混合模式 (价值6:趋势4)
+# ── 选股筛选 v0.9 — 12因子混合打分（价值7+趋势4）──
 python scripts/stock_screen.py screen --limit 8
 python scripts/stock_screen.py analyze --codes "600519,300750"
 
-# 自定义比例（如5:5均势、7:3偏价值）
-python scripts/stock_screen.py screen --mode hybrid --ratio "5:5" --limit 8
-python scripts/stock_screen.py screen --mode hybrid --ratio "7:3" --limit 8
+# 跳过估值查询（更快，适合快速筛选）
+python scripts/stock_screen.py screen --no-valuation --limit 10
 
-# 纯价值模式（适合长期投资筛选）
-python scripts/stock_screen.py screen --mode value --limit 8
-
-# 纯趋势模式（适合短线交易观察）
-python scripts/stock_screen.py screen --mode trend --limit 8
+# 自定义权重调整
+python scripts/stock_screen.py screen --weights '{"valuation_pe":2.0}' --limit 8
 ```
 
 ## 局限性
