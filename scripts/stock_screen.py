@@ -1560,15 +1560,31 @@ def format_output(data_list, title="📊 分析结果", show_valuation=True):
 # 三栏式输出系统 (2026-05-08)
 # ═══════════════════════════════════════════════
 
-def format_summary_table(data_list, title="📊 筛选结果总览"):
-    """第一栏：大列表展示所有股票的核心指标 + 各期间收益率"""
-    print(f"\n{'='*70}")
-    print(f"{title}")
-    print("="*70)
+# ═══════════════════════════════════════════════════════════
+# 📊 标准盘前报告模板 v1.0
+# 每次screen命令输出此格式，固化可复用
+# ═══════════════════════════════════════════════════════════
 
-    header = f"{'排名':<4} {'代码'} {'名称':<8} {'价格':>8} {'涨跌':>6} {'得分':>5} | {'近1月':>8} {'近3月':>8} {'近半年':>8} {'近1年':>8}"
+def format_report_header(title="📈 盘前选股分析报告"):
+    """报告头部：时间戳 + 筛选参数说明"""
+    from datetime import datetime
+    print(f"\n{'='*80}")
+    print(f"{title}")
+    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | v0.9 统一打分规则")
+    print(f"{'='*80}\n")
+
+
+def format_summary_table(data_list, title="📊 Top 选股总览"):
+    """第一栏：大列表 — 核心指标 + 四个期间收益率（近1月/3月/半年/年）+ PE/PB/ROE"""
+    print(f"\n{'─'*80}")
+    print(f"{title}")
+    print("─"*80)
+
+    header = f"{'#':<3} {'代码':>6} {'名称':<8} {'价格':>7} {'涨跌':>5} {'得分':>4}"
+    header += f" | {'PE':>5} {'PB':>4} {'ROE%':>5}"
+    header += f" | {'近1月':>6} {'近3月':>6} {'近半年':>6} {'近1年':>6}"
     print(header)
-    print("-"*70)
+    print("-"*80)
 
     for idx, item in enumerate(data_list, 1):
         code = str(item.get('code', ''))
@@ -1577,17 +1593,40 @@ def format_summary_table(data_list, title="📊 筛选结果总览"):
         change_pct = float(item.get('change_pct', 0)) if isinstance(item.get('change_pct'), (int, float)) else 0
         score = float(item.get('screen_score', 0))
 
+        pe = item.get('pe_ttm') or 'N/A'
+        pb = item.get('pb') or 'N/A'
+        roe = item.get('roe') or 'N/A'
+        if isinstance(pe, (int, float)): pe = f"{pe:.1f}"
+        else: pe = str(pe)
+        if isinstance(pb, (int, float)): pb = f"{pb:.2f}"
+        else: pb = str(pb)
+        if isinstance(roe, (int, float)): roe = f"{roe:.1f}"
+        else: roe = str(roe)
+
         periods = item.get('period_returns') or {}
-        r1m = periods.get('近1个月', 0)
-        r3m = periods.get('近3个月', 0)
-        r6m = periods.get('近半年', 0)
-        r1y = periods.get('近1年', 0)
+        r1m = periods.get('近1个月', 0) or 0
+        r3m = periods.get('近3个月', 0) or 0
+        r6m = periods.get('近半年', 0) or 0
+        r1y = periods.get('近1年', 0) or 0
 
         cp_emoji = "🟢" if change_pct > 0 else ("🔴" if change_pct < 0 else "⚪")
-        row = f"{idx:<4} {code:>6} {name:<8} ¥{price:>7.2f} {cp_emoji}{change_pct:>5.1f}% {score:>5.2f} | {r1m:>+7.1f}% {r3m:>+7.1f}% {r6m:>+7.1f}% {r1y:>+7.1f}%"
+        row = f"{idx:<3} {code:>6} {name:<8} ¥{price:>6.2f} {cp_emoji}{change_pct:>4.1f}% {score:>4.2f}"
+        row += f" | {pe:>5} {pb:>4} {roe:>5}"
+        row += f" | {r1m:>+5.1f}% {r3m:>+5.1f}% {r6m:>+5.1f}% {r1y:>+5.1f}%"
         print(row)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'─'*80}")
+
+
+def format_detailed_analysis(data_list, limit=10):
+    """第二栏：Top N 个股深度分析卡（估值解读 + 技术面 + 风险因素）"""
+    print(f"\n{'='*80}")
+    print(f"🔍 Top {limit} 个股深度分析")
+    print("="*80)
+
+    for idx, item in enumerate(data_list[:limit], 1):
+        text = analyze_stock_text(item, rank=idx)
+        print(text)
 
 
 def analyze_stock_text(item, rank=0):
@@ -2552,16 +2591,10 @@ def main():
                     persistent_count = 0
                 fresh_count = len(discovered) if discovered else 0
                 pool_note = f"动态池{persistent_count + fresh_count}只(持久化{persistent_count}+新发现{fresh_count})"
-                # ═══ 三栏式输出：大列表 + Top10详细分析 + 配置建议 ═══
-                format_summary_table(results, title=f"📊 热门股池筛选结果 ({len(results)}只)")
-                
-                print(f"\n{'='*70}")
-                print("🔍 Top 10 个股深度分析")  
-                print("="*70)
-                
-                for idx, item in enumerate(results[:10], 1):
-                    text = analyze_stock_text(item, rank=idx)
-                    print(text)
+                # ═══ 📊 标准盘前报告模板 v1.0 ═══
+                format_report_header()
+                format_summary_table(results, title=f"📊 Top 选股总览 ({len(results)}只)")
+                format_detailed_analysis(results, limit=10)
                 
                 format_portfolio_suggestion(results, max_count=5)
                 print(f"\n{'='*50}")
