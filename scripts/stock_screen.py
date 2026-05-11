@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-轻量版股票筛选器 v0.9 - 混合源方案
+轻量版股票筛选器 — 混合源方案
 =====================================
 采用akshare多源数据 + Exa可选增强:
 1. akshare三源发现热门标的 (stock_hot_rank_em/zt_pool_em/全量扫描)
 2. TuShare/AkShare 个股分析确认 (估值+财务+K线)
 3. Exa搜索近期新闻情绪 (可选，需mcporter配置)
+
+版本号: 动态从git tag读取 (_get_git_version())
 
 Usage:
     # 快速模式:直接分析指定股票池
@@ -1646,11 +1648,12 @@ def format_output(data_list, title="📊 分析结果", show_valuation=True):
 # ═══════════════════════════════════════════════════════════
 
 def format_report_header(title="📈 盘前选股分析报告"):
-    """报告头部：时间戳 + 筛选参数说明"""
+    """报告头部：时间戳 + git tag版本信息"""
     from datetime import datetime
+    version = _get_git_version()
     print(f"\n{'='*80}")
     print(f"{title}")
-    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | v0.9 统一打分规则")
+    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | {version} 统一打分规则")
     print(f"{'='*80}\n")
 
 
@@ -2572,9 +2575,28 @@ def _calc_simple_signal_score(hist_df, current_price, change_pct):
             score += min(abs(diff) * 5, 1.5)
     
     return round(min(score, 10.0), 2)
+
+
+def _get_git_version() -> str:
+    """动态获取当前git tag版本，无tag时返回dev"""
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--always"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
 def main():
-    """主函数入口 - stock_screen v9+ (P1-P5 completed)"""
-    parser = argparse.ArgumentParser(description='轻量版股票筛选器 v0.9 — 混合打分模型 (价值6:趋势4) + Exa可选增强')
+    """主函数入口 - stock_screen (版本号动态从git tag读取)"""
+    version_tag = _get_git_version()
+    parser = argparse.ArgumentParser(
+        description=f'轻量版股票筛选器 ({version_tag}) — 混合打分模型 + Exa可选增强'
+    )
     subparsers = parser.add_subparsers(dest='action', help='操作类型')
 
     # ── 分析指定股票 ──
