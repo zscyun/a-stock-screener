@@ -3,5 +3,9 @@ __pycache__/
 *.pyo
 *.pyd
 .hot_pool_state.json
+scripts/hot_pool_state.json
+_valuation_state.json
+_financial_abstract_state.json
 .env
 .DS_Store
+scripts/__pycache__/

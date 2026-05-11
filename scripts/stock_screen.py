@@ -38,6 +38,7 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
+from pathlib import Path
 import os
 import sys
 from datetime import datetime
@@ -85,6 +86,29 @@ CACHE_TTL_L3 = 18000                     # L3财务数据半天
 # 估值/财务API结果缓存（避免重复查询）
 VALUATION_CACHE: Dict[str, Any] = {}
 FA_CACHE: Dict[str, Any] = {}
+
+# ─── 本地持久化缓存（方案A：akshare不可达时读JSON缓存） ───
+_VAL_FILE = Path(__file__).parent / "_valuation_state.json"
+_FA_FILE = Path(__file__).parent / "_financial_abstract_state.json"
+_CACHE_TTL_SECONDS = 5 * 86400  # 5天有效期
+
+def _load_persistent_cache(json_file: Path) -> Dict:
+    """从JSON文件加载持久化缓存"""
+    try:
+        if json_file.exists():
+            with open(json_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"⚠️ 读取缓存文件失败: {e}", file=sys.stderr)
+    return {}
+
+def _save_persistent_cache(json_file: Path, cache_data: Dict):
+    """保存缓存到JSON文件"""
+    try:
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 保存缓存文件失败: {e}", file=sys.stderr)
 
 
 
@@ -497,80 +521,136 @@ def discover_stocks(max_discover: int = L2_CANDIDATE_COUNT) -> Dict[str, str]:
 def get_valuation(code: str, price: float) -> Dict[str, Any]:
     """
     获取个股估值指标: PE(TTM), PB, PEG, PCF(市现率), PS(市销率)
-    来源: AkShare stock_value_em — 返回历史序列,取最新一行
+    三级缓存策略:
+      L1 → 内存VALUATION_CACHE (秒回)
+      L2 → AkShare stock_value_em (实时)
+      L3 → _valuation_state.json 持久化缓存 (<5天有效)
     """
+    # L1: 内存缓存
     if code in VALUATION_CACHE:
         return VALUATION_CACHE[code]
 
+    result = {}
+    pcache = {}
+
+    # L2: AkShare实时获取
     try:
         import akshare as ak
         df = ak.stock_value_em(symbol=code)
-        if df is None or df.empty:
-            return {}
-        row = df.tail(1).iloc[0]
-        result = {
-            'pe_ttm': round(float(row.get('PE(TTM)', 0)), 2) if pd_notna(row, 'PE(TTM)') else None,
-            'pe_static': round(float(row.get('PE(静)', 0)), 2) if pd_notna(row, 'PE(静)') else None,
-            'pb': round(float(row.get('市净率', 0)), 2) if pd_notna(row, '市净率') else None,
-            'peg': round(float(row.get('PEG值', 0)), 4) if pd_notna(row, 'PEG值') else None,
-            'pcf': round(float(row.get('市现率', 0)), 2) if pd_notna(row, '市现率') else None,
-            'ps': round(float(row.get('市销率', 0)), 2) if pd_notna(row, '市销率') else None,
-        }
-        VALUATION_CACHE[code] = result
-        return result
+        if df is not None and not df.empty:
+            row = df.tail(1).iloc[0]
+            result = {
+                'pe_ttm': round(float(row.get('PE(TTM)', 0)), 2) if pd_notna(row, 'PE(TTM)') else None,
+                'pe_static': round(float(row.get('PE(静)', 0)), 2) if pd_notna(row, 'PE(静)') else None,
+                'pb': round(float(row.get('市净率', 0)), 2) if pd_notna(row, '市净率') else None,
+                'peg': round(float(row.get('PEG值', 0)), 4) if pd_notna(row, 'PEG值') else None,
+                'pcf': round(float(row.get('市现率', 0)), 2) if pd_notna(row, '市现率') else None,
+                'ps': round(float(row.get('市销率', 0)), 2) if pd_notna(row, '市销率') else None,
+            }
     except Exception as e:
-        print(f"⚠️ {code} 估值数据获取失败: {e}", file=sys.stderr)
-        return {}
+        print(f"⚠️ {code} AkShare估值数据获取失败: {e}", file=sys.stderr)
+
+    # L3: 持久化缓存 fallback（akshare不可达时读JSON文件）
+    if not result:
+        try:
+            pcache = _load_persistent_cache(_VAL_FILE)
+            entry = pcache.get(code, {})
+            cached_ts = entry.get('_ts', 0)
+            age = time.time() - cached_ts
+            if age < _CACHE_TTL_SECONDS and entry.get('pe_ttm') is not None:
+                result = {k: v for k, v in entry.items() if k != '_ts'}
+                print(f"💾 {code} 估值数据使用本地缓存 ({age/86400:.1f}天前)", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ {code} 持久化估值缓存读取失败: {e}", file=sys.stderr)
+
+    # L2成功时保存到持久化缓存
+    if result and pcache.get(code) is None:
+        try:
+            pcache[code] = dict(result, _ts=time.time())
+            _save_persistent_cache(_VAL_FILE, pcache)
+        except Exception:
+            pass
+
+    VALUATION_CACHE[code] = result
+    return result
 
 
 def get_financial_abstract(code: str) -> Dict[str, Any]:
     """
     获取个股最新一期财务摘要: ROE, 毛利率, 净利率, 现金流, 负债率等
-    来源: AkShare stock_financial_abstract_ths — 取最新一行
+    三级缓存策略:
+      L1 → 内存FA_CACHE (秒回)
+      L2 → AkShare stock_financial_abstract_ths (实时)
+      L3 → _financial_abstract_state.json 持久化缓存 (<5天有效)
     """
+    # L1: 内存缓存
     if code in FA_CACHE:
         return FA_CACHE[code]
 
+    result = {}
+
+    def pct_to_float(val):
+        """把 '52.22%' 或 False/NaN 转为浮点数"""
+        s = str(val).strip().rstrip('%')
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+
+    def raw_to_float(val):
+        """把原始数值转浮点（排除 False/NaN）"""
+        if val == 'False' or val is False:
+            return None
+        try:
+            return round(float(val), 4)
+        except (ValueError, TypeError):
+            return None
+
+    # L2: AkShare实时获取
     try:
         import akshare as ak
         df = ak.stock_financial_abstract_ths(symbol=code)
-        if df is None or df.empty:
-            return {}
-        row = df.tail(1).iloc[0]
-
-        def pct_to_float(val):
-            """把 '52.22%' 或 False/NaN 转为浮点数"""
-            s = str(val).strip().rstrip('%')
-            try:
-                return float(s)
-            except (ValueError, TypeError):
-                return None
-
-        def raw_to_float(val):
-            """把原始数值转浮点（排除 False/NaN）"""
-            if val == 'False' or val is False:
-                return None
-            try:
-                return round(float(val), 4)
-            except (ValueError, TypeError):
-                return None
-
-        result = {
-            'roe': pct_to_float(row.get('净资产收益率', None)),
-            'gross_margin': pct_to_float(row.get('销售毛利率', None)),
-            'net_margin': pct_to_float(row.get('销售净利率', None)),
-            'debt_ratio': pct_to_float(row.get('资产负债率', None)),
-            'eps': raw_to_float(row.get('基本每股收益', None)),
-            'bvps': raw_to_float(row.get('每股净资产', None)),
-            'ocfps': raw_to_float(row.get('每股经营现金流', None)),
-            'current_ratio': raw_to_float(row.get('流动比率', None)),
-            'quick_ratio': raw_to_float(row.get('速动比率', None)),
-        }
-        FA_CACHE[code] = result
-        return result
+        if df is not None and not df.empty:
+            row = df.tail(1).iloc[0]
+            result = {
+                'roe': pct_to_float(row.get('净资产收益率', None)),
+                'gross_margin': pct_to_float(row.get('销售毛利率', None)),
+                'net_margin': pct_to_float(row.get('销售净利率', None)),
+                'debt_ratio': pct_to_float(row.get('资产负债率', None)),
+                'eps': raw_to_float(row.get('基本每股收益', None)),
+                'bvps': raw_to_float(row.get('每股净资产', None)),
+                'ocfps': raw_to_float(row.get('每股经营现金流', None)),
+                'current_ratio': raw_to_float(row.get('流动比率', None)),
+                'quick_ratio': raw_to_float(row.get('速动比率', None)),
+            }
     except Exception as e:
-        print(f"⚠️ {code} 财务数据获取失败: {e}", file=sys.stderr)
-        return {}
+        print(f"⚠️ {code} AkShare财务数据获取失败: {e}", file=sys.stderr)
+
+    # L3: 持久化缓存 fallback（akshare不可达时读JSON文件）
+    if not result:
+        try:
+            fcache = _load_persistent_cache(_FA_FILE)
+            entry = fcache.get(code, {})
+            cached_ts = entry.get('_ts', 0)
+            age = time.time() - cached_ts
+            if age < _CACHE_TTL_SECONDS and entry.get('roe') is not None:
+                result = {k: v for k, v in entry.items() if k != '_ts'}
+                print(f"💾 {code} 财务数据使用本地缓存 ({age/86400:.1f}天前)", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ {code} 持久化财务缓存读取失败: {e}", file=sys.stderr)
+
+    # L2成功时保存到持久化缓存
+    if result:
+        try:
+            fcache = _load_persistent_cache(_FA_FILE)
+            if fcache.get(code) is None:
+                fcache[code] = dict(result, _ts=time.time())
+                _save_persistent_cache(_FA_FILE, fcache)
+        except Exception:
+            pass
+
+    FA_CACHE[code] = result
+    return result
 
 
 def pd_notna(row, col):
