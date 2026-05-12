@@ -1236,16 +1236,18 @@ DEFAULT_WEIGHTS = {
     'cashflow':     0.8,   # 每股经营现金流为正
     'health':       0.7,   # 负债率健康、流动/速动比率好
 
-    # === 趋势因子组 (4个,v0.9新增) ===
+    # === 趋势因子组 (6个,v1.0.3+新增可买入性) ===
     'consec_up_days': 1.2, # K线连续上涨天数(3-5天最佳)
     'volume_surge':   1.0, # 今日量 vs 20日均量(温和放量最佳)
     'ma_alignment':   1.2, # MA多头排列程度
     'sector_heat':    0.8, # 板块热度(Exa搜索新闻情绪)
+    'limit_up_risk':  1.5, # 🆕 v1.0.3: 涨停风险因子（连续涨停扣分）
+    'buyability':     1.2, # 🆕 v1.0.3: 可买入性因子（建仓空间评估）
 }
 
 # ─── 因子分组定义(用于 --ratio 动态调整) ───
 VALUE_FACTOR_KEYS = {'valuation_pe', 'valuation_pb', 'peg', 'roe', 'margins', 'cashflow', 'health'}
-TREND_FACTOR_KEYS = {'consec_up_days', 'volume_surge', 'ma_alignment', 'sector_heat'}
+TREND_FACTOR_KEYS = {'consec_up_days', 'volume_surge', 'ma_alignment', 'sector_heat', 'limit_up_risk', 'buyability'}
 
 
 def _apply_ratio(weights: Dict, ratio_str: str) -> Dict:
@@ -1330,6 +1332,88 @@ def _apply_ratio_once(weights: Dict, ratio_str: str, already_printed: list) -> D
     result = _apply_ratio(weights, ratio_str)
     already_printed.append(True)
     return result
+
+
+def _score_limit_up_risk(data: Dict[str, Any], kline_closes: Optional[List[float]] = None) -> float:
+    """
+    涨停风险因子 (v1.0.3+) → 满分1分
+
+    逻辑:
+      - A股主板涨跌停 ±10%，创业板/科创板 ±20%
+      - 连续涨停 ≥2天 → 严重扣分（大概率买不到）
+      - 单日涨幅 >9% → 中度扣分（接近涨停，建仓空间小）
+      - 温和上涨 3-7% → 最佳（有动量还有建仓空间）
+    """
+    cpct = data.get('change_pct', 0) or 0
+    score = 1.0  # 默认满分
+
+    # ── 检测连续涨停 (基于K线收盘价) ──
+    consec_limit_up = 0
+    if kline_closes and len(kline_closes) >= 2:
+        for i in range(len(kline_closes) - 1, 0, -1):
+            prev_close = kline_closes[i - 1]
+            curr_close = kline_closes[i]
+            if prev_close > 0:
+                daily_pct = (curr_close - prev_close) / prev_close * 100
+                # 主板10%，创业板/科创板20%，用9.5%和19%作为判断阈值
+                if abs(daily_pct) >= 9.5:
+                    consec_limit_up += 1
+                else:
+                    break
+            else:
+                break
+
+    # ── 扣分逻辑 ──
+    if consec_limit_up >= 3:
+        score = 0.1   # 🚨 连续涨停≥3天：大概率买不到，严重追高风险
+    elif consec_limit_up == 2:
+        score = 0.3   # ⚠️ 连板：建仓窗口极小
+    elif cpct >= 9.5:
+        score = 0.4   # 📈 接近涨停：空间有限，谨慎
+    elif cpct >= 7:
+        score = 0.7   # ✅ 涨幅较大但还有空间
+    else:
+        score = 1.0   # ✅✅ 正常范围，有建仓窗口
+
+    return max(0, min(1, score))
+
+
+def _score_buyability(data: Dict[str, Any], kline_closes: Optional[List[float]] = None) -> float:
+    """
+    可买入性因子 (v1.0.3+) → 满分1分
+
+    逻辑:
+      - 评估当前价格是否还有合理的建仓空间
+      - 偏离MA5太远 → 短期超买，扣分
+      - RSI > 80 → 严重超买，不建议追高
+      - 成交量异常放大 → 可能是出货信号
+    """
+    score = 1.0  # 默认满分
+    cpct = data.get('change_pct', 0) or 0
+
+    # ── MA5偏离度检查 ──
+    ma5 = data.get('ma5')
+    price = data.get('price', 0)
+    if ma5 and price > 0:
+        deviation = (price - float(ma5)) / float(ma5) * 100
+        if abs(deviation) >= 8:  # 偏离MA5 ≥8%：严重超买/超卖
+            score -= 0.4
+        elif abs(deviation) >= 5:  # 偏离 ≥5%：中度偏离
+            score -= 0.2
+
+    # ── RSI超买检查 (如果有RSI数据) ──
+    rsi = data.get('rsi')
+    if rsi is not None:
+        if rsi > 80:
+            score -= 0.3   # 🚨 严重超买
+        elif rsi > 70:
+            score -= 0.15  # ⚠️ 接近超买区
+
+    # ── 单日涨幅过大检查 ──
+    if cpct >= 9:  # 接近涨停
+        score -= 0.2
+
+    return max(0, min(1, score))
 
 
 def _score_momentum(data: Dict[str, Any]) -> float:
@@ -1782,6 +1866,22 @@ def compute_score(data: Dict[str, Any], weights: Optional[Dict] = None, use_exa:
     else:
         s = 0.5  # 批量模式用中性分跳过Exa
     weighted_score += s * w['sector_heat']
+
+    # === v1.0.3: 涨停风险因子 + 可买入性因子 ===
+
+    # 涨停风险检测（连续涨停/接近涨停扣分）
+    if kline_closes:
+        s = _score_limit_up_risk(data, kline_closes)
+        weighted_score += s * w['limit_up_risk']
+    else:
+        weighted_score += 0.5 * w['limit_up_risk']  # 无数据给中性分
+
+    # 可买入性评估（建仓空间+RSI超买检查）
+    if kline_closes:
+        s = _score_buyability(data, kline_closes)
+        weighted_score += s * w['buyability']
+    else:
+        weighted_score += 0.5 * w['buyability']  # 无数据给中性分
 
     # 归一化到 0-10
     final = round(weighted_score / total_weight * 10, 2)

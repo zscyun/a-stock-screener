@@ -1,7 +1,7 @@
 ---
 name: a-stock-combo
 description: 综合A股分析技能，结合TuShare实时行情 + AkShare多源数据，提供快速且深度的个股分析能力。支持快速模式和深度联动模式（+Exa新闻 + web_fetch财报）。适用于A股查询、财报拆解、估值分析和交易观察等场景。
-version: 1.0.3
+version: 1.0.4
 metadata:
   openclaw:
     emoji: "📈"
@@ -248,7 +248,7 @@ python scripts/a_stock_cli.py fetch-financials --code "300750"
 # 综合报告（默认全量）
 python scripts/a_stock_cli.py analyze --code "600519" --type full
 
-# ── 选股筛选 v1.0.3 — Staleness 自动刷新 + Python 兼容修复 ──
+# ── 选股筛选 v1.0.4 — 涨停风险检测 + 可买入性因子 (v1.0.3+) ──
 # 基本用法
 python scripts/stock_screen.py screen --limit 10
 python scripts/stock_screen.py analyze --codes "600519,300750"
@@ -314,6 +314,27 @@ pip install -r requirements.txt --upgrade
 - **解决**：跑一次完整筛选后，FA_CACHE 会自动建立，后续质量提升
 
 ---
+
+---
+
+## 🆕 v1.0.4 Changelog (2026-05-12)
+
+### 核心升级：解决"涨停股买不到"问题
+| # | 功能 | 说明 |
+|---|------|------|
+| 1 | `_score_limit_up_risk` | 涨停风险因子 — 检测连续涨停≥3天/接近涨停，严重扣分 |
+| 2 | `_score_buyability` | 可买入性因子 — MA5偏离度+RSI超买检查，评估建仓空间 |
+
+### 打分系统变化
+- **趋势因子组** 从 4个 → 6个（新增 limit_up_risk=1.5, buyability=1.2）
+- **连续涨停≥3天** → score=0.1（严重追高风险，大概率买不到）
+- **单日涨幅>9%** → score=0.4（接近涨停，建仓空间小）
+- **MA5偏离≥8% + RSI>80** → 可买入性扣 0.7分
+
+### Bug Fix & 清理 (v1.0.3)
+- `tushare_compat.py`: f-string 内 `\n` 转义符在 Python<3.12 报错 → 提取为独立函数修复
+- 注释中的 TODO #2/#3 标记全部清理，避免新用户困惑
+- Staleness 自动刷新 — screen_hot_pool 超24h静默触发 discover_stocks()
 
 ---
 
