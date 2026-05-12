@@ -1449,19 +1449,29 @@ def _chase_safety_score(data: Dict[str, Any], kline_closes: Optional[List[float]
             risk_score -= 0.1  # ⚠️ 昨日最高今日回调，短顶信号
             result['details'].append('⚠️冲高回落')
 
-    # ── 综合判定 ──
+    # ── 综合判定 (v1.0.5+) ──
     if risk_score >= 0.6:
         result['risk_level'] = '🟢可追'
-        result['strategy'] = '突破买入/回踩MA5介入'
+        if rsi and rsi > 75:
+            result['strategy'] = '等回踩MA5再介入'
+        else:
+            result['strategy'] = '突破买入/分批建仓'
     elif risk_score >= 0.3:
         result['risk_level'] = '🟡谨慎'
-        if rsi and rsi > 80:
-            result['strategy'] = '等RSI回调至75以下再介入'
+        if rsi and rsi > 85:
+            result['strategy'] = '等RSI回调至75以下'
+        elif consec_limit_up >= 2:
+            result['strategy'] = '连板期，等分歧低吸'
         else:
-            result['strategy'] = '回踩MA5/10日均线介入'
+            result['strategy'] = '回踩MA10日均线介入'
     else:
         result['risk_level'] = '🔴别碰'
-        result['strategy'] = '高潮期，建议等回调或换标的'
+        if consec_limit_up >= 3 and rsi and rsi > 85:
+            result['strategy'] = '情绪高潮，坚决回避'
+        elif consec_limit_up >= 3:
+            result['strategy'] = '连板加速，等高位分歧'
+        else:
+            result['strategy'] = '技术破位，建议换标的'
 
     return result
 
@@ -2567,21 +2577,23 @@ def _classify_stock_type(item: Dict[str, Any]) -> str:
 
 def _is_toxic(item: Dict[str, Any]) -> bool:
     """
-    P0质量红线:判断一只股票是否属于"毒资产"
+    P0质量红线(v1.0.5+):判断一只股票是否属于"毒资产"
     亏损、ROE极低、毛利率失控 → 保守型绝对不碰
+    
+    v1.0.5升级:收紧PE过滤(排除亏损股更严格) + ROE门槛从2%→3%
     """
     pe = float(item.get('pe_ttm', 0)) if item.get('pe_ttm') else 0
     roe = float(item.get('roe', 0)) if item.get('roe') else 0
     gross_margin = float(item.get('gross_margin', 0)) if item.get('gross_margin') else 0
 
-    # PE为负 → 亏损股
-    if pe < 0:
+    # PE为负 → 亏损股 (v1.0.5+:也排除PE异常高的壳股)
+    if pe < 0 or (pe > 500 and roe < 5):
         return True
-    # ROE < 2% → 盈利能力太低(连银行定存都不如)
-    if roe < 2.0:
+    # ROE < 3% → 盈利能力太低(v1.0.5:门槛从2%提升到3%)
+    if roe < 3.0:
         return True
-    # 毛利率 < 5% → 成本失控,薄利多销型不适合做底仓
-    if gross_margin > 0 and gross_margin < 5.0:
+    # 毛利率 < 8% → 成本失控,薄利多销型不适合做底仓(v1.0.5:门槛从5%→8%)
+    if gross_margin > 0 and gross_margin < 8.0:
         return True
 
     return False
@@ -2871,19 +2883,24 @@ def format_portfolio_suggestion(data_list, max_count=5):
     print(f"\n📦 【保守型】最多买3只(稳健为主)")
     port3 = []
 
-    # 优先从价值型选,不足则从平衡型补充
+    # v1.0.5+辅助函数:判断是否为🔴别碰标的
+    def _is_red_flag(stock):
+        chase = stock.get('chase_info', {})
+        return chase.get('risk_level') == '🔴别碰'
+
+    # 优先从价值型选,不足则从平衡型补充(v1.0.5+:同时排除🔴标的)
     available_for_conservative = value_candidates + balanced_candidates
     for stock in available_for_conservative[:6]:
         if len(port3) >= 3:
             break
-        if not _is_toxic(stock):  # P0: 跳过toxic stock
+        if not _is_toxic(stock) and not _is_red_flag(stock):  # P0+v1.0.5: 跳过toxic和🔴标的
             port3.append(stock)
 
-    # P0修复:如果还不够3只,从全部候选中补足,但跳过toxic stock
+    # P0修复:如果还不够3只,从全部候选中补足(v1.0.5+:同样排除🔴)
     warning_msg = ""
     if len(port3) < 3 and sorted_stocks:
         for stock in sorted_stocks:
-            if stock not in port3 and not _is_toxic(stock):
+            if stock not in port3 and not _is_toxic(stock) and not _is_red_flag(stock):
                 port3.append(stock)
             if len(port3) >= 3:
                 break
@@ -2923,9 +2940,25 @@ def format_portfolio_suggestion(data_list, max_count=5):
         prices = _calc_suggested_prices(stock)
         print(f"      💰 买入¥{prices['buy_price']} | 止损¥{prices['stop_loss']} | 止盈¥{prices['take_profit_1']}/¥{prices['take_profit_2']}")
 
-    # P3修复:进取型按类型正确分配
+    # P3修复:进取型按类型正确分配(v1.0.5+:联动chase_info)
     print(f"\n📦 【进取型】最多买5只(均衡配置)")
     port5 = []
+
+    # v1.0.5+:对候选列表排序时优先🟢可追、降权🔴别碰
+    def _chase_sort_key(stock):
+        chase = stock.get('chase_info', {})
+        level = chase.get('risk_level', '')
+        if '🟢' in level:
+            return 0  # 🟢最高优先级
+        elif '🟡' in level:
+            return 1
+        else:
+            return 2  # 🔴最低优先级
+
+    # v1.0.5+:各类别内部按chase风险排序
+    value_candidates.sort(key=_chase_sort_key)
+    balanced_candidates.sort(key=_chase_sort_key)
+    growth_candidates.sort(key=_chase_sort_key)
 
     # 均衡配置:2价值 + 1平衡 + 1成长 + 1投机(可选)
     port5.extend(value_candidates[:2])
