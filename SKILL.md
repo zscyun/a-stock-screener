@@ -1,7 +1,7 @@
 ---
 name: a-stock-combo
 description: 综合A股分析技能，结合TuShare实时行情 + AkShare多源数据，提供快速且深度的个股分析能力。支持快速模式和深度联动模式（+Exa新闻 + web_fetch财报）。适用于A股查询、财报拆解、估值分析和交易观察等场景。
-version: 0.9.0
+version: 1.0.0
 metadata:
   openclaw:
     emoji: "📈"
@@ -262,6 +262,10 @@ python scripts/stock_screen.py screen --no-valuation --limit 10
 
 # 自定义权重调整
 python scripts/stock_screen.py screen --weights '{"valuation_pe":2.0}' --limit 8
+
+# 💾 报告保存到文件（同时输出到控制台）
+python scripts/stock_screen.py screen --limit 15 -o /reports/daily-report.txt
+python scripts/stock_screen.py analyze --codes "600519,300750" -o /tmp/analysis.json --format json
 ```
 
 ## 局限性
@@ -373,3 +377,34 @@ PE(TTM)、PB、PEG、ROE、毛利率+净利率、现金流、财务健康度
 
 🔍 Top N 个股深度分析 (估值解读框 + 🔧技术面 + 📈收益追踪 + ⭐综合评级)
 ```
+
+### 📧 邮件报告分发 (v1.0.0)
+
+**脚本**: `scripts/screener_email_dispatch.py`
+
+**功能**: 将 screener 选股报告以精美HTML邮件形式发送到指定邮箱
+
+**使用方式**:
+```bash
+# 直接运行发送盘前报告
+python3 scripts/screener_email_dispatch.py
+
+# 或结合 screener 命令（先筛选再发邮件）
+python3 stock_screen.py screen --limit 15 && python3 scripts/screener_email_dispatch.py
+```
+
+**邮件模板设计**:
+- 🟢 渐变绿色头部 - 大标题 + 日期/版本信息
+- 📊 Panel 1: Top N总览表（斑马纹行、涨跌红绿配色、Top3金/银/铜背景）
+- 🔍 Panel 2: 深度分析卡（彩色左边框、估值/技术面/收益追踪分色区块）
+- 🎯 Panel 3: 组合建议表（保守型蓝色系 + 进取型橙色系）
+
+**配置**:
+- SMTP: smtp.qq.com:587 (TLS)
+- 发件人/收件人在脚本中可配置
+- HTML正文大小: ~48KB，附件: CLI原始输出文本(~22KB)
+
+**扩展计划**: 
+- [ ] 支持命令行参数指定报告类型（盘前/收盘/异动预警）
+- [ ] 支持多收件人列表
+- [ ] 支持自定义邮件主题模板

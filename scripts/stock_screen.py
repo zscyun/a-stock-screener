@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import subprocess
 import sys
@@ -47,6 +48,25 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 import io as _io_module
 from contextlib import redirect_stdout as _redirect_stdout
+
+# ═══════════════════════════════════════════════
+# 报告输出工具 (v1.0)
+# ═══════════════════════════════════════════════
+class TeeWriter:
+    """同时写入 sys.stdout 和文件（用于 -o/--output）"""
+    def __init__(self, filepath: str):
+        self._file = open(filepath, 'w', encoding='utf-8')
+
+    def write(self, text: str):
+        sys.__stdout__.write(text)
+        self._file.write(text)
+        self._file.flush()
+
+    def flush(self):
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
 
 # ═══════════════════════════════════════════════
 # 动态池管理 (v7) — 零硬编码，三层漏斗筛选  
@@ -1962,6 +1982,15 @@ def analyze_stock_text(item, rank=0):
         for reason in news_reasons[:3]:
             lines.append(f"      • {reason}")
 
+    # 操作价格建议 (新增)
+    prices = _calc_suggested_prices(item)
+    lines.append(f"\n   💰 建议操作价位:")
+    lines.append(f"      买入参考价: ¥{prices['buy_price']}")
+    lines.append(f"      止损价:     ¥{prices['stop_loss']} (-{(1 - prices['stop_loss']/prices['buy_price'])*100:.0f}%)")
+    lines.append(f"      止盈目标1:  ¥{prices['take_profit_1']} (+20%)")
+    lines.append(f"      止盈目标2:  ¥{prices['take_profit_2']} (+50%)")
+    lines.append(f"      📝 {prices['note']}")
+
     lines.append(f"\n   ⭐⭐⭐ 综合评级：{rating_text}")
 
     return "\n".join(lines)
@@ -2170,6 +2199,112 @@ def _calc_portfolio_weights(portfolio: List[Dict[str, Any]]) -> List[int]:
     return [int(w) for w in weights]
 
 
+def _calc_suggested_prices(item):
+    """
+    计算建议操作价格（买入价、止损价、止盈目标）
+
+    基于技术面数据：
+    - 买入价: MA5附近或布林中轨（取较保守者），如果当前已偏离MA5超过10%则标注"等回调"
+    - 止损价: 买入价 × (1 - stop_pct)，stop_pct默认8-12%（根据波动率调整）
+    - 止盈目标1: 买入价 × 1.20, 止盈目标2: 买入价 × 1.50
+
+    Returns dict with keys: buy_price, stop_loss, take_profit_1, take_profit_2, note
+    """
+    price = float(item.get('price', 0))
+    ma5_val = item.get('ma5')
+    boll_mid = None
+
+    # 布林中轨 ≈ (upper + lower) / 2
+    boll_upper = item.get('boll_upper')
+    boll_lower = item.get('boll_lower')
+    if boll_upper and boll_lower:
+        try:
+            boll_mid = (float(boll_upper) + float(boll_lower)) / 2
+        except:
+            pass
+
+    # RSI for overbought check
+    rsi_val = None
+    rsi = item.get('rsi14')
+    if rsi is not None:
+        try:
+            rsi_val = float(rsi)
+        except:
+            pass
+
+    # 确定入场参考位
+    references = []
+    if ma5_val:
+        try:
+            references.append(('MA5', float(ma5_val)))
+        except:
+            pass
+    if boll_mid:
+        references.append(('BOLL中轨', boll_mid))
+
+    # 取最保守的（最低的那个）作为买入参考价
+    if references:
+        buy_ref_name, buy_ref = min(references, key=lambda x: x[1])
+    else:
+        buy_ref = price
+        buy_ref_name = '现价'
+
+    # 如果超买严重(RSI>80)或MA5偏离>10%，建议等回调
+    wait_pullback = False
+    note_parts = []
+
+    if rsi_val is not None and rsi_val > 80:
+        wait_pullback = True
+        note_parts.append(f"RSI={rsi_val:.0f}超买，建议等回调")
+
+    if ma5_val and price > 0:
+        try:
+            diff = (price / float(ma5) - 1) * 100
+            if diff > 10:
+                wait_pullback = True
+                note_parts.append(f"偏离MA5+{diff:.0f}%")
+        except:
+            pass
+
+    # 买入价：如果等回调则用参考位，否则现价附近
+    if wait_pullback:
+        buy_price = round(buy_ref * 1.02, 2)  # 参考位上方2%给一点空间
+        note_parts.append(f"建议等回踩{buy_ref_name}附近")
+    else:
+        buy_price = round(price, 2)
+
+    # 止损价：买入价下方8-12%（波动大的给更多空间）
+    stop_pct = 0.10
+    if rsi_val is not None and rsi_val > 75:
+        stop_pct = 0.12  # 高RSI说明波动大，止损宽一点
+    elif boll_upper and boll_lower and price > 0:
+        try:
+            band_width = (float(boll_upper) - float(boll_lower)) / price
+            if band_width > 0.15:  # 布林带宽度>15%，高波动
+                stop_pct = 0.12
+            elif band_width < 0.08:  # 窄幅震荡，低波动
+                stop_pct = 0.08
+        except:
+            pass
+
+    stop_loss = round(buy_price * (1 - stop_pct), 2)
+
+    # 止盈目标：+20% 和 +50%
+    take_profit_1 = round(buy_price * 1.20, 2)
+    take_profit_2 = round(buy_price * 1.50, 2)
+
+    note = "; ".join(note_parts) if note_parts else "当前价位可考虑介入"
+
+    return {
+        'buy_price': buy_price,
+        'stop_loss': stop_loss,
+        'take_profit_1': take_profit_1,
+        'take_profit_2': take_profit_2,
+        'note': note,
+        'buy_ref_name': buy_ref_name,
+    }
+
+
 def format_portfolio_suggestion(data_list, max_count=5):
     """根据得分和特征给出组合配置建议（最多买N只）"""
     print(f"\n{'='*70}")
@@ -2251,6 +2386,8 @@ def format_portfolio_suggestion(data_list, max_count=5):
         
         print(f"   {idx}. {name}({code}) - [{sector}] {role}")
         print(f"      得分: {score:.2f} | PE={pe} | ROE={roe}%")
+        prices = _calc_suggested_prices(stock)
+        print(f"      💰 买入¥{prices['buy_price']} | 止损¥{prices['stop_loss']} | 止盈¥{prices['take_profit_1']}/¥{prices['take_profit_2']}")
 
     # P3修复：进取型按类型正确分配
     print(f"\n📦 【进取型】最多买5只（均衡配置）")
@@ -2284,6 +2421,8 @@ def format_portfolio_suggestion(data_list, max_count=5):
         stock_type_label = type_labels.get(stype, '平衡')
         print(f"   {idx}. {name}({code}) - {stock_type_label}")
         print(f"      建议仓位: ~{weights[idx-1]}% | 得分: {score:.2f} | 近1年: {r1y:+.0f}%")
+        prices = _calc_suggested_prices(stock)
+        print(f"      💰 买入¥{prices['buy_price']} | 止损¥{prices['stop_loss']} | 止盈¥{prices['take_profit_1']}/¥{prices['take_profit_2']}")
 
     # P4升级：个性化风险提示
     print(f"\n⚠️ 本组合风险提示:")
@@ -2332,6 +2471,30 @@ def format_portfolio_suggestion(data_list, max_count=5):
     print("   • 建议分批建仓，控制单只股票仓位不超过30%")
     print("   • 设置止损位（通常-8%~-10%）和止盈目标（+20%~+50%）")
     print("   • 关注个股财报季表现及行业政策变化")
+
+    # 操作价格汇总表 (新增)
+    print(f"\n{'─'*70}")
+    print("📋 个股操作方案汇总")
+    print("─"*70)
+
+    header = f"{'股票':<12} {'建议仓位':>6} {'买入价':>8} {'止损价':>8} {'止盈T1':>8} {'止盈T2':>8}"
+    print(header)
+    print("-"*70)
+
+    for idx, stock in enumerate(port5[:5], 1):
+        name = stock.get('name', '未知')[:6]
+        code = stock.get('code', '')
+        prices = _calc_suggested_prices(stock)
+        weight_str = f"~{weights[idx-1]}%" if idx <= len(weights) else "~20%"
+
+        row = f"{name}({code}) {weight_str:>6}"
+        row += f" ¥{prices['buy_price']:>7.2f}"
+        row += f" ¥{prices['stop_loss']:>7.2f}"
+        row += f" ¥{prices['take_profit_1']:>7.2f}"
+        row += f" ¥{prices['take_profit_2']:>7.2f}"
+        print(row)
+
+    print(f"\n{'─'*70}")
 
     print(f"\n{'='*70}")
 
@@ -2619,13 +2782,15 @@ def main():
     discover_p = subparsers.add_parser('discover', help='通过akshare三源动态发现热门标的')
     discover_p.add_argument('--max-discover', type=int, default=10, help='最多发现几只新标的')
 
-    # ── 全局选项: JSON输出 / 权重配置 / 快速模式 ──
+    # ── 全局选项: JSON输出 / 权重配置 / 快速模式 / 报告文件 ──
     for sub in subparsers.choices.values():
         sub.add_argument('--format', choices=['table', 'json'], default='table')
         sub.add_argument('--no-valuation', action='store_true', help='跳过估值/财务查询(更快)')
         sub.add_argument('--weights', type=str, default=None,
                         help='自定义权重JSON，如 \'{"valuation_pe":2.0}\'')
         sub.add_argument('--enable-exa', action='store_true', help='启用Exa板块热度搜索(默认关闭)')
+        sub.add_argument('-o', '--output', type=str, default=None,
+                        help='将报告保存到指定文件（同时输出到控制台）')
 
     args = parser.parse_args()
 
@@ -2656,14 +2821,31 @@ def main():
             )
 
             if fmt == 'json':
-                print(json.dumps(safe_serializable(results), ensure_ascii=False, indent=2))
+                output = json.dumps(safe_serializable(results), ensure_ascii=False, indent=2)
+                print(output)
+                if getattr(args, 'output', None):
+                    with open(args.output, 'w', encoding='utf-8') as outf:
+                        outf.write(output + '\n')
             else:
-                format_output(results, f"🎯 个股分析 ({len(results)}只)", show_valuation=show_valuation)
-                # Exa不可达时提醒
-                if EXA_FAILED:
-                    print("\n⚠️ [注意] Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
-                    print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
-                    print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
+                # ═══ -o/--output: 同时写文件和控制台 ═══
+                tee = None
+                output_path = getattr(args, 'output', None)
+                if output_path:
+                    tee = TeeWriter(output_path)
+                    sys.stdout = tee
+                
+                try:
+                    format_output(results, f"🎯 个股分析 ({len(results)}只)", show_valuation=show_valuation)
+                    # Exa不可达时提醒
+                    if EXA_FAILED:
+                        print("\n⚠️ [注意] Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
+                        print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
+                        print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
+                finally:
+                    if tee:
+                        sys.stdout = sys.__stdout__
+                        tee.close()
+                        print(f"\n📄 报告已保存到: {output_path}", file=sys.__stdout__)
 
         elif args.action == 'screen':
             # 默认走动态池构建（零硬编码），--discover标志保留向后兼容  
@@ -2683,7 +2865,12 @@ def main():
             )
 
             if fmt == 'json':
-                print(json.dumps(safe_serializable(results), ensure_ascii=False, indent=2))
+                output = json.dumps(safe_serializable(results), ensure_ascii=False, indent=2)
+                print(output)
+                # JSON 也支持写入文件
+                if getattr(args, 'output', None):
+                    with open(args.output, 'w', encoding='utf-8') as outf:
+                        outf.write(output + '\n')
             else:
                 try:
                     with open(POOL_STATE_FILE, 'r', encoding='utf-8') as pf:
@@ -2693,20 +2880,34 @@ def main():
                     persistent_count = 0
                 fresh_count = len(discovered) if discovered else 0
                 pool_note = f"动态池{persistent_count + fresh_count}只(持久化{persistent_count}+新发现{fresh_count})"
-                # ═══ 📊 标准盘前报告模板 v1.0 ═══
-                format_report_header()
-                format_summary_table(results, title=f"📊 Top 选股总览 ({len(results)}只)")
-                format_detailed_analysis(results, limit=10)
                 
-                format_portfolio_suggestion(results, max_count=5)
-                print(f"\n{'='*50}")
-                print(f"注: 基于{pool_note}实时数据")
+                # ═══ -o/--output: 同时写文件和控制台 ═══
+                tee = None
+                output_path = getattr(args, 'output', None)
+                if output_path:
+                    tee = TeeWriter(output_path)
+                    sys.stdout = tee
                 
-                # Exa不可达时提醒
-                if EXA_FAILED:
-                    print("\n⚠️ [注意] 本次筛选过程中 Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
-                    print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
-                    print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
+                try:
+                    # ═══ 📊 标准盘前报告模板 v1.0 ═══
+                    format_report_header()
+                    format_summary_table(results, title=f"📊 Top 选股总览 ({len(results)}只)")
+                    format_detailed_analysis(results, limit=10)
+                    
+                    format_portfolio_suggestion(results, max_count=5)
+                    print(f"\n{'='*50}")
+                    print(f"注: 基于{pool_note}实时数据")
+                    
+                    # Exa不可达时提醒
+                    if EXA_FAILED:
+                        print("\n⚠️ [注意] 本次筛选过程中 Exa API 调用失败，板块热度因子使用默认中性分(0.5)")
+                        print("   可能原因：网络超时、mcporter未配置或Exa服务不可达")
+                        print("   建议：检查 ~/.openclaw/workspace/config/mcporter.json 配置后重试\n")
+                finally:
+                    if tee:
+                        sys.stdout = sys.__stdout__
+                        tee.close()
+                        print(f"\n📄 报告已保存到: {output_path}", file=sys.__stdout__)
 
         elif args.action == 'discover':
             discovered = discover_stocks(max_discover=getattr(args, 'max_discover', 10))
