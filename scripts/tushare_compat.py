@@ -55,10 +55,15 @@ def _patch_tushare_trading():
         import re
         
         # Pattern: data = data.append(something,\n                           ignore_index=True)
+        def _append_to_concat(m):
+            g1 = m.group(1)
+            g2 = m.group(2).replace("\n", "").strip()
+            return f'{g1} = pd.concat([{g1}, {g2}], ignore_index=True)'
+
         content = re.sub(
             r'(data\s*=\s*data)\.append\(\s*\n?\s*(.*?)\n?\s*,\s*\n?\s*ignore_index\s*=\s*True\)',
-            lambda m: f'{m.group(1)} = pd.concat([{m.group(1)}, {m.group(2).replace("\\n", "").strip()}], ignore_index=True)',
-            content, 
+            _append_to_concat,
+            content,
             flags=re.DOTALL
         )
         

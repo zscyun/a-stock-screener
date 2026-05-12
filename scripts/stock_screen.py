@@ -1095,7 +1095,7 @@ def get_stock_data(code: str, include_valuation: bool = True) -> Optional[Dict[s
             data['_kline_closes'] = closes_series[-60:]  # 最近60天收盘价
             data['_kline_volumes'] = volumes_series[-60:] if volumes_series else []
 
-        # ── TODO #2: 估值 + 财务数据 ──
+        # ── 估值 + 财务数据 (v0.9+) ──
         if include_valuation:
             data.update(get_valuation(code, price))
             data.update(get_financial_abstract(code))
@@ -1168,7 +1168,7 @@ def screen_hot_pool(
         use_exa: 是否启用Exa板块热度搜索 (默认False保性能,与analyze统一规则)
         ratio: "VALUE:TREND"格式,如"3:7"(趋势优先)
     """
-    # 构建动态池 (合并持久化记忆 + 新发现)
+    # ── Step 0: 构建动态池 (合并持久化记忆 + 新发现) ───────────────
     dynamic_state = _load_pool_state()
     dynamic_pool_raw = dynamic_state.get('pool', {})
 
@@ -1179,12 +1179,23 @@ def screen_hot_pool(
         pool_dict = {code: (info['name'] if isinstance(info, dict) else info)
                      for code, info in dynamic_pool_raw.items()}
 
-    # 如果池子为空,触发一次完整L1/L2/L3发现流程
+    # ── Step 1: 空池 → 首次全量扫描 ─────────────────────────────
     if not pool_dict:
         print("⚠️ 动态池为空,触发首次全量扫描...", file=sys.stderr)
         pool_dict = discover_stocks()
         dynamic_state = _load_pool_state()
         dynamic_pool_raw = dynamic_state.get('pool', {})
+
+    # ── Step 2: Staleness 检测 — 超阈值自动静默刷新 (v1.0.3+) ─────
+    elif not discovered:
+        staleness = _check_pool_staleness(dynamic_state)
+        if staleness['status'] == 'stale':
+            print(f"🔄 池子已 {staleness['age_hours']:.0f}h 未刷新(阈值={POOL_MAX_AGE_HOURS}h),自动静默刷新...", file=sys.stderr)
+            pool_dict = discover_stocks()
+            dynamic_state = _load_pool_state()
+            dynamic_pool_raw = dynamic_state.get('pool', {})
+        elif staleness['status'] == 'warning':
+            print(f"⚠️ 池子状态异常: {staleness['issues']}", file=sys.stderr)
 
     # 对池子中的股票做L3深度财务分析 (只对Top N只,控制耗时)
     results = []
@@ -1212,7 +1223,7 @@ def screen_hot_pool(
     return results[:limit]
 
 
-# ─── 多因子打分模型 (TODO #3) ──────────────────────────────
+# ─── 多因子打分模型 (v0.9+ 8因子) ─────────────────────────
 
 # 默认因子权重配置(总分10分制)
 DEFAULT_WEIGHTS = {
@@ -1806,7 +1817,7 @@ def format_output(data_list, title="📊 分析结果", show_valuation=True):
             diff = (float(price) / float(ma5) - 1) * 100 if float(ma5) > 0 else 0
             print(f"   MA5参考: ¥{ma5} ({'+↑' if diff > 0 else '-↓'}{abs(diff):.1f}%)")
 
-        # ── TODO #2/#3: 估值 + 财务指标展示 ──
+        # ── 估值 + 财务指标展示 (v0.9+) ──
         if show_valuation:
             pe = item.get('pe_ttm')
             pb = item.get('pb')
