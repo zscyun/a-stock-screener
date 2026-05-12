@@ -248,10 +248,19 @@ python scripts/a_stock_cli.py fetch-financials --code "300750"
 # 综合报告（默认全量）
 python scripts/a_stock_cli.py analyze --code "600519" --type full
 
-# ── 选股筛选 v0.9 — 统一打分规则（价值7+趋势4）──
-# 默认不启用Exa（保性能，两种模式得分一致）
+# ── 选股筛选 v1.0.2 — 动态权重比 + 池子健康度维护 ──
+# 基本用法
 python scripts/stock_screen.py screen --limit 10
 python scripts/stock_screen.py analyze --codes "600519,300750"
+
+# 🆕 --ratio: 动态调整价值/趋势权重比（默认~6成价值/~3成趋势）
+python scripts/stock_screen.py screen --limit 10 --ratio "3:7"   # 趋势优先
+python scripts/stock_screen.py screen --limit 10 --ratio "7:3"   # 价值优先
+python scripts/stock_screen.py analyze --codes "600519,300750" --ratio "1:2"  # 成长股友好
+
+# 🆕 v5.0: 池子健康度维护（体检+清理+报告）
+python scripts/stock_screen.py maintain                    # 基础体检
+python scripts/stock_screen.py maintain --force-refresh   # 过时池子自动完整发现
 
 # 启用Exa板块热度搜索（需mcporter配置，两种模式统一规则）
 python scripts/stock_screen.py screen --enable-exa --limit 10
