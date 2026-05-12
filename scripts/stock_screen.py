@@ -1160,7 +1160,8 @@ def screen_hot_pool(
     include_valuation: bool = True,
     weights: Optional[Dict] = None,
     use_exa: bool = False,
-    ratio: Optional[str] = None
+    ratio: Optional[str] = None,
+    chase_mode: bool = False  # 🆕 v1.0.4+ 安全追涨模式
 ) -> List[Dict[str, Any]]:
     """从动态构建的池子筛选 (三层漏斗: L1全量→L2热度动量→L3财务深度)
 
@@ -1217,6 +1218,13 @@ def screen_hot_pool(
             if min_change_pct <= cpct <= max_change_pct:
                 score = compute_score(data, weights=weights, use_exa=use_exa, ratio=ratio)
                 data['screen_score'] = round(score, 2)
+                
+                # 🆕 v1.0.4+ chase_mode: 计算安全追涨评分
+                if chase_mode:
+                    kline_closes = data.get('_kline_closes') or []
+                    chase_result = _chase_safety_score(data, kline_closes)
+                    data['chase_info'] = chase_result
+                
                 results.append(data)
 
     results.sort(key=lambda x: x.get('screen_score', 0), reverse=True)
@@ -1331,6 +1339,130 @@ def _apply_ratio_once(weights: Dict, ratio_str: str, already_printed: list) -> D
     
     result = _apply_ratio(weights, ratio_str)
     already_printed.append(True)
+    return result
+
+
+def _chase_safety_score(data: Dict[str, Any], kline_closes: Optional[List[float]] = None) -> Dict[str, Any]:
+    """
+    安全追涨评分 (v1.0.4+) → 返回 {
+        'risk_level': '🟢可追' | '🟡谨慎' | '🔴别碰',
+        'strategy': '突破买入' | '回踩MA5买入' | '等回调'
+    }
+
+    综合维度:
+      - limit_up_count: 连续涨停次数 (1-2=启动期, ≥3=高潮期)
+      - rsi_level: RSI超买程度 (>80强势但可控, >90极端情绪)
+      - volume_ratio: 成交量 vs 均量 (温和放大最佳,爆量警惕)
+      - macd_status: MACD金叉延续中最好
+      - candle_pattern: K线形态(实体阳线好,长上影/十字星差)
+    """
+    result = {
+        'risk_level': '🟢可追',
+        'strategy': '突破买入',
+        'details': []
+    }
+
+    cpct = data.get('change_pct', 0) or 0
+    risk_score = 0.5  # 中性起点，越高越安全
+
+    # ── 维度1: 连续涨停次数检测 ──
+    consec_limit_up = 0
+    if kline_closes and len(kline_closes) >= 2:
+        for i in range(len(kline_closes) - 1, 0, -1):
+            prev_close = kline_closes[i - 1]
+            curr_close = kline_closes[i]
+            if prev_close > 0:
+                daily_pct = (curr_close - prev_close) / prev_close * 100
+                if abs(daily_pct) >= 9.5:  # 接近涨停/跌停
+                    consec_limit_up += 1
+                else:
+                    break
+            else:
+                break
+
+    if consec_limit_up == 0 or consec_limit_up == 1:
+        risk_score += 0.2  # ✅ 首次启动或刚启动，还能上车
+        result['details'].append('✅首次/单板启动')
+    elif consec_limit_up == 2:
+        risk_score += 0.1  # ⚠️ 连板但还可操作
+        result['details'].append('⚠️双板连涨')
+    elif consec_limit_up >= 3:
+        risk_score -= 0.4  # 🚨 高潮期，风险极大
+        result['details'].append(f'🚨连续{consec_limit_up}板，高潮期')
+
+    # ── 维度2: RSI超买程度 ──
+    rsi = data.get('rsi14') or data.get('rsi')
+    if rsi is not None:
+        result['rsi'] = round(rsi, 1)
+        if rsi <= 60:
+            risk_score += 0.15  # ✅ RSI不高，安全
+            result['details'].append(f'✅RSI={round(rsi,1)},未超买')
+        elif rsi <= 75:
+            risk_score += 0.05  # ✅ 强势区但可控
+            result['details'].append(f'✅RSI={round(rsi,1)},强势可控')
+        elif rsi <= 85:
+            pass  # ⚠️ 超买但还能操作，不加分不减分
+            result['details'].append(f'⚠️RSI={round(rsi,1)},已超买')
+        else:
+            risk_score -= 0.2  # 🚨 RSI>85极端情绪
+            result['details'].append(f'🚨RSI={round(rsi,1)},极端超买')
+    
+    # ── 维度3: 成交量健康度 ──
+    kline_volumes = data.get('_kline_volumes', []) or []
+    if kline_volumes and len(kline_volumes) >= 20:
+        avg_vol_20 = sum(kline_volumes[-20:]) / 20.0
+        if avg_vol_20 > 0:
+            vol_ratio = kline_volumes[-1] / avg_vol_20
+            result['vol_ratio'] = round(vol_ratio, 2)
+            if 1.2 <= vol_ratio <= 3.5:
+                risk_score += 0.15  # ✅ 温和放量，健康上涨
+                result['details'].append(f'✅温和放量({round(vol_ratio,1)}x)')
+            elif vol_ratio > 5:
+                risk_score -= 0.2  # 🚨 异常爆量，警惕出货
+                result['details'].append(f'🚨异常爆量({round(vol_ratio,1)}x)')
+            elif vol_ratio < 0.8:
+                risk_score -= 0.05  # ⚠️ 缩量上涨，动能不足
+                result['details'].append(f'⚠️缩量上涨')
+
+    # ── 维度4: MACD状态 ──
+    macd_bar = data.get('macd_bar')
+    if macd_bar is not None:
+        result['macd_status'] = '金叉' if macd_bar > 0 else '死叉'
+        if macd_bar > 0:
+            risk_score += 0.1  # ✅ MACD金叉，趋势延续
+            result['details'].append('✅MACD金叉')
+        else:
+            risk_score -= 0.2  # 🚨 MACD死叉，即将回调
+            result['details'].append('🚨MACD死叉')
+
+    # ── 维度5: K线形态（基于最近3天）──
+    if kline_closes and len(kline_closes) >= 3:
+        last_close = kline_closes[-1]
+        prev_close = kline_closes[-2]
+        prev_prev_close = kline_closes[-3]
+        
+        # 判断是否有明显的见顶信号（长上影/阴包阳）
+        if last_close > prev_close and prev_close > prev_prev_close:
+            risk_score += 0.05  # ✅ 连续阳线，趋势健康
+            result['details'].append('✅三连阳')
+        elif last_close < prev_close and prev_close > prev_prev_close:
+            risk_score -= 0.1  # ⚠️ 昨日最高今日回调，短顶信号
+            result['details'].append('⚠️冲高回落')
+
+    # ── 综合判定 ──
+    if risk_score >= 0.6:
+        result['risk_level'] = '🟢可追'
+        result['strategy'] = '突破买入/回踩MA5介入'
+    elif risk_score >= 0.3:
+        result['risk_level'] = '🟡谨慎'
+        if rsi and rsi > 80:
+            result['strategy'] = '等RSI回调至75以下再介入'
+        else:
+            result['strategy'] = '回踩MA5/10日均线介入'
+    else:
+        result['risk_level'] = '🔴别碰'
+        result['strategy'] = '高潮期，建议等回调或换标的'
+
     return result
 
 
@@ -2053,13 +2185,19 @@ def format_report_header(title="📈 盘前选股分析报告"):
     print(f"{'='*80}\n")
 
 
-def format_summary_table(data_list, title="📊 Top 选股总览"):
-    """第一栏:大列表 - 核心指标 + 四个期间收益率(近1月/3月/半年/年)+ PE/PB/ROE"""
+def format_summary_table(data_list, title="📊 Top 选股总览", chase_mode=False):
+    """第一栏:大列表 - 核心指标 + 四个期间收益率(近1月/3月/半年/年)+ PE/PB/ROE
+    
+    Args:
+        chase_mode: 安全追涨模式，额外显示🟢🟡🔴风险等级和上车策略
+    """
     print(f"\n{'─'*80}")
     print(f"{title}")
     print("─"*80)
 
     header = f"{'#':<3} {'代码':>6} {'名称':<8} {'价格':>7} {'涨跌':>5} {'得分':>4}"
+    if chase_mode:
+        header += f" | {'追涨':<6} {'策略':<12}"  # 🆕 v1.0.4+ 安全追涨模式列
     header += f" | {'PE':>5} {'PB':>4} {'ROE%':>5}"
     header += f" | {'近1月':>6} {'近3月':>6} {'近半年':>6} {'近1年':>6}"
     print(header)
@@ -2090,6 +2228,14 @@ def format_summary_table(data_list, title="📊 Top 选股总览"):
 
         cp_emoji = "🟢" if change_pct > 0 else ("🔴" if change_pct < 0 else "⚪")
         row = f"{idx:<3} {code:>6} {name:<8} ¥{price:>6.2f} {cp_emoji}{change_pct:>4.1f}% {score:>4.2f}"
+
+        # 🆕 v1.0.4+ chase_mode: 显示追涨风险等级和上车策略
+        if chase_mode:
+            chase = item.get('chase_info', {})
+            risk = chase.get('risk_level', '🟡')[:6]
+            strategy = chase.get('strategy', '')[:10]
+            row += f" | {risk:<6} {strategy:<12}"
+
         row += f" | {pe:>5} {pb:>4} {roe:>5}"
         row += f" | {r1m:>+5.1f}% {r3m:>+5.1f}% {r6m:>+5.1f}% {r1y:>+5.1f}%"
         print(row)
@@ -2366,6 +2512,18 @@ def analyze_stock_text(item, rank=0):
     lines.append(f"      止盈目标1:  ¥{prices['take_profit_1']} (+20%)")
     lines.append(f"      止盈目标2:  ¥{prices['take_profit_2']} (+50%)")
     lines.append(f"      📝 {prices['note']}")
+
+    # 🆕 v1.0.4+ chase_mode: 显示安全追涨评分详情
+    chase_info = item.get('chase_info')
+    if chase_info:
+        lines.append("")
+        lines.append(f"   {'🎯' + '安全追涨评估':<25}")
+        lines.append(f"      风险等级: {chase_info.get('risk_level', 'N/A')}")
+        lines.append(f"      上车策略: {chase_info.get('strategy', 'N/A')}")
+        details = chase_info.get('details', [])
+        if details:
+            for d in details[:4]:  # 最多显示4条详情
+                lines.append(f"         • {d}")
 
     lines.append(f"\n   ⭐⭐⭐ 综合评级:{rating_text}")
 
@@ -3149,6 +3307,9 @@ def main():
     screen_p.add_argument('--min-change', type=float, default=-2.0)
     screen_p.add_argument('--max-change', type=float, default=15.0)
     screen_p.add_argument('--discover', action='store_true', help='先通过akshare三源发现新标的再筛选')
+    screen_p.add_argument('--chase-mode', action='store_true',
+                         help='安全追涨模式:标注🟢🟡🔴风险等级+上车策略(捕捉动量股但控制追高风险)',
+                         default=False)
 
     # ── P5: 回测功能 ──
     backtest_p = subparsers.add_parser('backtest', help='历史回测验证模型信号')
@@ -3245,6 +3406,7 @@ def main():
                 weights=custom_weights,
                 use_exa=getattr(args, 'enable_exa', False),
                 ratio=getattr(args, 'ratio', None),
+                chase_mode=getattr(args, 'chase_mode', False),  # 🆕 v1.0.4+ 安全追涨模式
             )
 
             if fmt == 'json':
@@ -3273,8 +3435,18 @@ def main():
 
                 try:
                     # ═══ 📊 标准盘前报告模板 v1.0 ═══
+                    chase_mode = getattr(args, 'chase_mode', False)
+
+                    if chase_mode:
+                        print(f"\n{'='*80}")
+                        print(f"🎯 安全追涨模式 — 捕捉动量股但控制追高风险")
+                        print(f"   🟢可追: 首次/单板启动,量能健康       ")
+                        print(f"   🟡谨慎: 连板或超买,建议等回调介入     ")
+                        print(f"   🔴别碰: 高潮期(≥3板+极端情绪),建议换标的")
+                        print(f"{'='*80}")
+
                     format_report_header()
-                    format_summary_table(results, title=f"📊 Top 选股总览 ({len(results)}只)")
+                    format_summary_table(results, title=f"📊 Top 选股总览 ({len(results)}只)", chase_mode=chase_mode)
                     format_detailed_analysis(results, limit=10)
 
                     format_portfolio_suggestion(results, max_count=5)
