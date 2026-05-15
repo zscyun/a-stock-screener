@@ -9,3 +9,4 @@ _financial_abstract_state.json
 .env
 .DS_Store
 scripts/__pycache__/
+*.bak
