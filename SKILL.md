@@ -459,6 +459,28 @@ PE(TTM)、PB、PEG、ROE、毛利率+净利率、现金流、财务健康度
 
 **功能**: 将 screener 选股报告以精美HTML邮件形式发送到指定邮箱
 
+**安装配置（首次使用前必读）**:
+```
+# 1. 复制配置模板
+cp scripts/email_config.env.example scripts/email_config.env
+
+# 2. 编辑配置文件，填写你的 SMTP 信息
+vi scripts/email_config.env
+
+# 3. email_config.env 已在 .gitignore 中，不会被提交到 Git
+```
+
+**配置文件说明 (`email_config.env`)**:
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `SMTP_SERVER` | ✅ | smtp.qq.com | SMTP服务器地址 |
+| `SMTP_PORT`   | ⬜️ | 587     | SMTP端口（TLS） |
+| `SENDER_EMAIL` | ✅ | —      | 发件人邮箱地址 |
+| `SMTP_PASSWORD` | ✅ | —      | SMTP授权密码（非登录密码！QQ需生成授权码） |
+| `RECIPIENT_EMAILS` | ✅ | —   | 收件人，多个用逗号分隔 |
+
+**环境变量替代方案**: 也可以直接在系统设置环境变量（如 `export SENDER_EMAIL=xxx@xx.com`），优先级高于 `.env` 文件。
+
 **使用方式**:
 ```bash
 # 直接运行发送盘前报告
@@ -474,12 +496,7 @@ python3 stock_screen.py screen --limit 15 && python3 scripts/screener_email_disp
 - 🔍 Panel 2: 深度分析卡（彩色左边框、估值/技术面/收益追踪分色区块）
 - 🎯 Panel 3: 组合建议表（保守型蓝色系 + 进取型橙色系）
 
-**配置**:
-- SMTP: smtp.qq.com:587 (TLS)
-- 发件人/收件人在脚本中可配置
-- HTML正文大小: ~48KB，附件: CLI原始输出文本(~22KB)
-
-**扩展计划**: 
-- [ ] 支持命令行参数指定报告类型（盘前/收盘/异动预警）
-- [ ] 支持多收件人列表
-- [ ] 支持自定义邮件主题模板
+**安全说明**:
+- 所有邮箱地址、SMTP密码均外置到 `email_config.env`，已在 `.gitignore`
+- GitHub 仓库中不包含任何敏感信息
+- 首次启动时自动检查配置完整性并给出明确指引

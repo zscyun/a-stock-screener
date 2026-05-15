@@ -9,6 +9,9 @@ v2.0 - 完全动态，无硬编码数据
 import smtplib, os, sys, re
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+# 脚本目录（供 _load_email_config 使用）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from datetime import date, datetime
@@ -47,31 +50,82 @@ class HTMLEmailOutputter:
     """将解析后的选股数据转换为精美HTML邮件"""
     
     def __init__(self):
-        # SMTP配置
-        self.smtp_server = "smtp.qq.com"
-        self.smtp_port = 587
-        self.sender_email = "65343914@qq.com"
-        
-        # 优先读环境变量，fallback 到 imap-smtp-email .env
-        password = os.environ.get("EMAIL_PASSWORD", "")
-        if not password:
-            env_path = os.path.join(os.path.dirname(__file__), '..', '..', 'imap-smtp-email-chinese', '.env')
-            env_path_resolved = os.path.normpath(env_path)
-            # 也试试 workspace root 下的 skill
-            alt_env = os.path.expanduser('~/.openclaw/workspace/skills/imap-smtp-email-chinese/.env')
-            for ep in [env_path_resolved, alt_env]:
-                if os.path.exists(ep):
-                    with open(ep, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line.startswith('SMTP_PASS='):
-                                password = line.split('=', 1)[1].strip()
-                                break
-                if password:
-                    break
-        self.sender_password = password
-        
-        self.recipient_emails = ["zscyun@hotmail.com"]
+        # ── 加载 SMTP/邮箱配置（全外置，不硬编码） ─────────
+        config = self._load_email_config()
+
+        self.smtp_server     = config.get("SMTP_SERVER", "smtp.qq.com")
+        self.smtp_port       = int(config.get("SMTP_PORT", "587"))
+        self.sender_email    = config.get("SENDER_EMAIL", "")
+        self.sender_password = config.get("SMTP_PASSWORD", "")
+
+        recipients_raw = config.get("RECIPIENT_EMAILS", "")
+        self.recipient_emails = [
+            r.strip() for r in recipients_raw.split(",") if r.strip()
+        ]
+
+    def _load_email_config(self):
+        """
+        加载邮件SMTP配置，优先级：
+          1. 系统环境变量 (SENDER_EMAIL, SMTP_PASSWORD 等)
+          2. scripts/email_config.env（本地配置文件，已在 .gitignore）
+          3. imap-smtp-email skill 的 .env（fallback）
+
+        返回: dict 键值对
+        """
+        config = {}
+        env_keys = ["SMTP_SERVER", "SMTP_PORT", "SENDER_EMAIL",
+                    "SMTP_PASSWORD", "RECIPIENT_EMAILS"]
+
+        # --- 1. 系统环境变量优先 ---
+        for key in env_keys:
+            val = os.environ.get(key, "")
+            if val:
+                config[key] = val
+
+        # --- 2. scripts/email_config.env (本地配置，不提交到Git) ---
+        local_env = os.path.join(SCRIPT_DIR, 'email_config.env')
+        if os.path.exists(local_env):
+            with open(local_env, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        config[k.strip()] = v.strip()
+
+        # --- 3. imap-smtp-email skill .env (fallback) ---
+        alt_envs = [
+            os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'imap-smtp-email-chinese', '.env')),
+            os.path.expanduser('~/.openclaw/workspace/skills/imap-smtp-email-chinese/.env'),
+        ]
+        for ep in alt_envs:
+            if os.path.exists(ep) and not config.get("SMTP_PASSWORD"):
+                with open(ep, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('SMTP_PASS='):
+                            config["SMTP_PASSWORD"] = line.split('=', 1)[1].strip()
+
+        return config
+
+    def _config_check(self):
+        """
+        启动时检查配置完整性，缺少关键项则告警并返回 False
+        """
+        missing = []
+        if not self.sender_email:
+            missing.append("SENDER_EMAIL")
+        if not self.sender_password:
+            missing.append("SMTP_PASSWORD")
+        if not self.recipient_emails:
+            missing.append("RECIPIENT_EMAILS")
+
+        if missing:
+            print(f"[email] ⚠️ 缺失配置项: {', '.join(missing)}")
+            print("[email] → 请复制 scripts/email_config.env.example 为 email_config.env 并填写")
+            return False
+        return True
     
     # ─── Panel 1: Top选股总览表 (含头部) ───
     def render_panel1(self, context, stocks):
@@ -835,6 +889,9 @@ class HTMLEmailOutputter:
     # ─── output() — SMTP发送邮件 ───
     def output(self, context, stocks):
         """渲染HTML并发送到指定邮箱"""
+        if not self._config_check():
+            print("[email] ❌ 配置不完整，中止发送")
+            return False
         try:
             html_content = self.render(context, stocks)
             

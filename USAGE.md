@@ -214,6 +214,49 @@ a-stock-combo/
 
 ---
 
+## 📧 邮件报告分发（首次使用前必读）
+
+### 安装配置
+
+```bash
+cd skills/a-stock-combo/scripts
+
+# 1. 复制配置模板
+cp email_config.env.example email_config.env
+
+# 2. 编辑配置文件，填写你的 SMTP 信息
+vi email_config.env
+```
+
+### 配置文件说明 (`email_config.env`)
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `SMTP_SERVER` | ✅ | smtp.qq.com | SMTP服务器地址 |
+| `SMTP_PORT`   | ⬜️ | 587     | SMTP端口（TLS） |
+| `SENDER_EMAIL` | ✅ | —      | 发件人邮箱地址 |
+| `SMTP_PASSWORD` | ✅ | —      | SMTP授权密码（非登录密码！QQ需生成授权码） |
+| `RECIPIENT_EMAILS` | ✅ | —   | 收件人，多个用逗号分隔 |
+
+### QQ 邮箱配置示例
+
+```bash
+cat > email_config.env << 'EOF'
+SMTP_SERVER=smtp.qq.com
+SMTP_PORT=587
+SENDER_EMAIL=your_qq_number@qq.com
+SMTP_PASSWORD=abcdefghijklmnop   # 这里填授权码，不是QQ密码！
+RECIPIENT_EMAILS=zscyun@hotmail.com,another@example.com
+EOF
+```
+
+### 安全说明
+- `email_config.env` 已在 `.gitignore` 中，**不会被提交到 GitHub**
+- 首次启动时自动检查配置完整性并给出明确指引
+- 环境变量优先级高于文件配置（适合 CI/CD 部署）
+
+---
+
 ## 🔗 相关链接
 
 - **GitHub**: https://github.com/zscyun/a-stock-screener

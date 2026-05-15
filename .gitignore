@@ -7,6 +7,7 @@ scripts/hot_pool_state.json
 _valuation_state.json
 _financial_abstract_state.json
 .env
+scripts/email_config.env
 .DS_Store
 scripts/__pycache__/
 *.bak
